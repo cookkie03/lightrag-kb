@@ -5,6 +5,15 @@ Usa il config centrale ~/lightrag-kb/config/global.env e il registro
 ~/lightrag-kb/config/registry.yaml. Ogni KB ha un lightrag-server dedicato su
 porta propria, working dir e input dir isolati, e un MCP server collegabile
 a Claude Code.
+
+Comandi raggruppati in stile docker/kubectl:
+  kb       gestione delle knowledge base (new, rm, ls, info, move, reset, regen, enable, disable, insert)
+  server   gestione dei server lightrag (start, stop, restart, status)
+  ingest   pipeline di estrazione (run, status, cancel, kill, recover)
+  mcp      registrazione MCP nei client (add, rm)
+  query    interrogazione di una KB (top-level) + query inspect
+  status   dashboard globale
+  search   comando legacy, non legato alle KB
 """
 from __future__ import annotations
 
@@ -70,7 +79,7 @@ def kb_data_dir(kb: dict) -> Path:
 
     Se il registry ha `data_dir` lo usa (es. <sorgente>/.lightrag), altrimenti
     fallback alla vecchia posizione locale kb/<nome>/. Così le KB già esistenti
-    continuano a funzionare finché non vengono migrate con `ragcli migrate`."""
+    continuano a funzionare finché non vengono migrate con `ragcli kb move`."""
     d = kb.get("data_dir")
     if d:
         return Path(d).expanduser()
@@ -96,6 +105,41 @@ def next_port(reg: dict, g: dict) -> int:
     while p in used:
         p += 1
     return p
+
+
+def _count_files(d: Path) -> int | None:
+    if not d.is_dir():
+        return None
+    return sum(1 for p in d.rglob("*") if p.is_file())
+
+
+def _pipeline_status(port: int, timeout: float = 5) -> dict | None:
+    try:
+        r = requests.get(f"http://127.0.0.1:{port}/documents/pipeline_status", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def _kill_orphan_ingest() -> list[str]:
+    """Killa eventuali processi ingest.py orfani (non lanciati da ragcli stesso). Ritorna i PID uccisi."""
+    r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+    killed = []
+    for line in r.stdout.splitlines():
+        if "ingest.py" in line and "ps" not in line and "ragcli" not in line:
+            parts = line.split()
+            if len(parts) > 1:
+                pid = parts[1]
+                subprocess.run(["kill", "-9", pid])
+                killed.append(pid)
+    return killed
+
+
+def _cancel_pipeline(port: int) -> dict:
+    r = requests.post(f"http://127.0.0.1:{port}/documents/cancel_pipeline", timeout=30)
+    r.raise_for_status()
+    return r.json()
 
 
 # ---------------------------------------------------------------- .env gen
@@ -136,7 +180,7 @@ def write_kb_env(kb: dict, g: dict) -> Path:
         emb_use_base64 = g.get("EMBEDDING_USE_BASE64", "true")
 
     env_lines = [
-        "# Generato da ragcli — NON editare a mano (usa `ragcli regen` dopo aver",
+        "# Generato da ragcli — NON editare a mano (usa `ragcli kb regen` dopo aver",
         "# cambiato config/global.env). Override per-KB vanno nel config/registry.yaml.",
         f"# provider: {provider}",
         "HOST=127.0.0.1",
@@ -182,9 +226,9 @@ def write_kb_env(kb: dict, g: dict) -> Path:
     return envp
 
 
-# ---------------------------------------------------------------- commands
+# ---------------------------------------------------------------- kb group
 
-def cmd_create(args):
+def cmd_kb_new(args):
     reg = load_registry()
     g = load_env(CONFIG)
     if find_kb(reg, args.name):
@@ -220,10 +264,10 @@ def cmd_create(args):
     print(f"  porta    : {kb['port']}  (WebUI: http://127.0.0.1:{kb['port']})")
     print(f"  provider : {kb.get('provider', g.get('LLM_PROVIDER', 'ollama'))}")
     print(f"  OCR      : {kb['ocr_backend']}")
-    print(f"\nProssimi passi:\n  ragcli start {args.name}\n  ragcli ingest {args.name}\n  ragcli mcp-add {args.name}")
+    print(f"\nProssimi passi:\n  ragcli server start {args.name}\n  ragcli ingest run {args.name}\n  ragcli mcp add {args.name}")
 
 
-def cmd_regen(args):
+def cmd_kb_regen(args):
     reg = load_registry()
     g = load_env(CONFIG)
     targets = reg["kbs"] if args.name == "all" else [find_kb(reg, args.name)]
@@ -234,7 +278,7 @@ def cmd_regen(args):
         print(f"✓ .env rigenerato per '{kb['name']}'")
 
 
-def cmd_migrate(args):
+def cmd_kb_move(args):
     """Sposta i dati di una KB esistente nella nuova posizione (default
     <sorgente>/.lightrag) e aggiorna il registry + .env. Ferma il server se attivo."""
     reg = load_registry()
@@ -270,10 +314,10 @@ def cmd_migrate(args):
         kb["data_dir"] = str(dest)
     save_registry(reg)
     write_kb_env(kb, g)  # riscrive .env con WORKING_DIR/INPUT_DIR aggiornati
-    print(f"✓ KB '{args.name}' migrata. Rilancia: ragcli start {args.name}")
+    print(f"✓ KB '{args.name}' migrata. Rilancia: ragcli server start {args.name}")
 
 
-def cmd_reset(args):
+def cmd_kb_reset(args):
     """Azzera l'indice di una KB per ripartire da zero (utile dopo run falliti o
     stato incoerente). Di default PRESERVA l'OCR già fatto (cartella inputs/) e
     cancella solo l'indice LightRAG (rag_storage/) e la cache locale di ingest:
@@ -291,7 +335,7 @@ def cmd_reset(args):
             print("Annullato.")
             return
     if port_pid(kb["port"]):
-        cmd_stop(argparse.Namespace(name=args.name))
+        _stop_one(kb)
     targets = [kdir / "rag_storage", kdir / ".ocr_cache.json"]
     if args.hard:
         targets.append(kdir / "inputs")
@@ -300,10 +344,10 @@ def cmd_reset(args):
             shutil.rmtree(t, ignore_errors=True)
         elif t.exists():
             t.unlink()
-    print(f"✓ KB '{args.name}' azzerata. Rilancia: ragcli start {args.name} && ragcli ingest {args.name}")
+    print(f"✓ KB '{args.name}' azzerata. Rilancia: ragcli server start {args.name} && ragcli ingest run {args.name}")
 
 
-def cmd_delete(args):
+def cmd_kb_rm(args):
     """Elimina una KB: de-registra l'MCP da tutti i client, la rimuove dal registro
     e opzionalmente cancella i suoi dati su disco."""
     reg = load_registry()
@@ -347,10 +391,10 @@ def cmd_delete(args):
     print(f"✓ KB '{args.name}' eliminata con successo.")
 
 
-def cmd_list(args):
+def cmd_kb_ls(args):
     reg = load_registry()
     if not reg["kbs"]:
-        print("Nessuna KB. Crea con: ragcli create <nome> <cartella>")
+        print("Nessuna KB. Crea con: ragcli kb new <nome> <cartella>")
         return
     g = load_env(CONFIG)
     print(f"{'NAME':<16}{'PORT':<7}{'STATO':<8}{'PROVIDER':<12}{'OCR':<15}{'EN':<4}SORGENTE")
@@ -360,6 +404,67 @@ def cmd_list(args):
         prov = kb.get("provider", g.get("LLM_PROVIDER", "ollama"))
         print(f"{kb['name']:<16}{kb['port']:<7}{up:<8}{prov:<12}{kb.get('ocr_backend','-'):<15}{en:<4}{kb['source_folder']}")
 
+
+def cmd_kb_info(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    g = load_env(CONFIG)
+    kdir = kb_data_dir(kb)
+    up = health(kb["port"])
+    pid = port_pid(kb["port"])
+    n_inputs = _count_files(kdir / "inputs")
+    n_storage = _count_files(kdir / "rag_storage")
+    print(f"KB              : {kb['name']}")
+    print(f"sorgente        : {kb['source_folder']}")
+    print(f"dati KB         : {kdir}")
+    print(f"porta           : {kb['port']}  (WebUI: http://127.0.0.1:{kb['port']})")
+    print(f"provider        : {kb.get('provider', g.get('LLM_PROVIDER', 'ollama'))}")
+    print(f"OCR backend     : {kb.get('ocr_backend', '-')}")
+    print(f"abilitata       : {'sì' if kb.get('enabled', True) else 'no'}")
+    print(f"server          : {'UP' if up else ('avviato ma non risponde (PID ' + pid + ')' if pid else 'down')}")
+    print(f"file in inputs/    : {n_inputs if n_inputs is not None else 'n/a (cartella assente)'}")
+    print(f"file in rag_storage: {n_storage if n_storage is not None else 'n/a (cartella assente)'}")
+
+
+def cmd_kb_enable(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    kb["enabled"] = True
+    save_registry(reg)
+    print(f"✓ KB '{args.name}' abilitata (verrà inclusa in `ragcli server start all`).")
+
+
+def cmd_kb_disable(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    kb["enabled"] = False
+    save_registry(reg)
+    print(f"✓ KB '{args.name}' disabilitata (verrà saltata da `ragcli server start all`).")
+
+
+def cmd_kb_insert(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    if not health(kb["port"]):
+        sys.exit(f"Server '{args.name}' non attivo.")
+    url = f"http://127.0.0.1:{kb['port']}/documents/text"
+    try:
+        r = requests.post(url, json={"text": args.text, "file_source": args.source}, timeout=300)
+        r.raise_for_status()
+        print("✓ Testo inserito con successo.")
+    except Exception as e:
+        sys.exit(f"Errore: {e}")
+
+
+# ---------------------------------------------------------------- server group
 
 def _ollama_has_model(host: str, name: str) -> bool:
     """True se il modello (anche senza tag :latest) è già presente in Ollama."""
@@ -376,8 +481,8 @@ def _ollama_has_model(host: str, name: str) -> bool:
 def ensure_ollama_models(kb: dict, g: dict) -> None:
     """Portabilità/self-heal: se la KB usa Ollama, scarica i modelli citati in
     global.env (LLM + embedding) quando mancano. Così spostando o ripristinando
-    la cartella lightrag-kb su un'altra macchina basta `ragcli start` e i modelli
-    vengono riscaricati da soli, senza Modelfile o passi manuali."""
+    la cartella lightrag-kb su un'altra macchina basta `ragcli server start` e i
+    modelli vengono riscaricati da soli, senza Modelfile o passi manuali."""
     provider = kb.get("provider", g.get("LLM_PROVIDER", "ollama"))
     if provider != "ollama":
         return  # openrouter & co.: nessun modello locale da garantire
@@ -415,7 +520,7 @@ def _start_one(kb, g):
     print(f"  avvio '{kb['name']}' su :{port} … (log: {log})")
 
 
-def cmd_start(args):
+def cmd_server_start(args):
     reg = load_registry()
     g = load_env(CONFIG)
     targets = ([k for k in reg["kbs"] if k.get("enabled", True)]
@@ -436,7 +541,7 @@ def _stop_one(kb):
         print(f"  '{kb['name']}' già spenta")
 
 
-def cmd_stop(args):
+def cmd_server_stop(args):
     reg = load_registry()
     targets = reg["kbs"] if args.name == "all" else [find_kb(reg, args.name)]
     for kb in targets:
@@ -445,10 +550,10 @@ def cmd_stop(args):
         _stop_one(kb)
 
 
-def cmd_restart(args):
-    cmd_stop(args)
+def cmd_server_restart(args):
+    cmd_server_stop(args)
     time.sleep(1)
-    cmd_start(args)
+    cmd_server_start(args)
 
 
 def _wait_health(port, timeout=60):
@@ -460,7 +565,39 @@ def _wait_health(port, timeout=60):
     return False
 
 
-def cmd_ingest(args):
+def cmd_server_status(args):
+    reg = load_registry()
+    for kb in reg["kbs"]:
+        up = health(kb["port"])
+        print(f"{kb['name']:<16} server={'UP' if up else 'down':<5} "
+              f":{kb['port']}  mcp=lightrag-{kb['name']}")
+
+
+# ---------------------------------------------------------------- ingest group
+
+def _ensure_pipeline_free(kb: dict, timeout: float = 30) -> bool:
+    """Se la pipeline è busy, la cancella e attende che torni libera.
+    Ritorna True se al termine la pipeline è libera (o lo era già)."""
+    d = _pipeline_status(kb["port"])
+    if d is None or not d.get("busy"):
+        return True
+    print(f"  pipeline di '{kb['name']}' occupata: richiedo cancellazione automatica…")
+    try:
+        _cancel_pipeline(kb["port"])
+    except Exception as e:
+        print(f"  ⚠ cancellazione pipeline fallita: {e}")
+        return False
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        d = _pipeline_status(kb["port"])
+        if d is None or not d.get("busy"):
+            print("  ✓ pipeline liberata.")
+            return True
+        time.sleep(2)
+    return False
+
+
+def cmd_ingest_run(args):
     reg = load_registry()
     g = load_env(CONFIG)
     kb = find_kb(reg, args.name)
@@ -471,6 +608,17 @@ def cmd_ingest(args):
         _start_one(kb, g)
         if not _wait_health(kb["port"]):
             sys.exit("Server non risponde. Controlla il log /tmp/lightrag-%s.log" % kb["name"])
+
+    # Auto-correttivo: se la pipeline è bloccata, la libera e ripulisce gli
+    # orfani prima di lanciare il nuovo ingest, evitando il manuale
+    # `ingest cancel` -> `ingest kill` -> retry.
+    if not _ensure_pipeline_free(kb):
+        sys.exit(f"Pipeline di '{args.name}' ancora occupata dopo il tentativo di cancellazione. "
+                  f"Riprova con `ragcli ingest recover {args.name}`.")
+    killed = _kill_orphan_ingest()
+    if killed:
+        print(f"  rimossi processi ingest.py orfani: {', '.join(killed)}")
+
     cmd = [str(MCP_PYTHON), str(INGEST_SCRIPT), "--kb", args.name]
     if args.force:
         cmd.append("--force")
@@ -489,82 +637,12 @@ def cmd_ingest(args):
         print(f"  puoi chiudere il terminale.")
         print(f"  log    : {log}")
         print(f"  segui  : tail -f {log}")
-        print(f"  stato  : ragcli pipeline {args.name}")
+        print(f"  stato  : ragcli ingest status {args.name}")
         return
     sys.exit(subprocess.call(cmd))
 
 
-def cmd_mcp_add(args):
-    reg = load_registry()
-    kb = find_kb(reg, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    mcp_name = f"lightrag-{args.name}"
-    clients = list(mcp_clients.CLIENTS) if args.client == "all" else [args.client]
-    rc = 0
-    for client in clients:
-        if len(clients) > 1:
-            print(f"\n== {client} ==")
-        fn = mcp_clients.CLIENTS[client]
-        if fn(mcp_name, MCP_PYTHON, MCP_SCRIPT, args.name, args.print_only) != 0:
-            rc = 1
-    sys.exit(rc)
-
-
-def cmd_status(args):
-    reg = load_registry()
-    for kb in reg["kbs"]:
-        up = health(kb["port"])
-        print(f"{kb['name']:<16} server={'UP' if up else 'down':<5} "
-              f":{kb['port']}  mcp=lightrag-{kb['name']}")
-
-
-def cmd_query(args):
-    reg = load_registry()
-    kb = find_kb(reg, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    if not health(kb["port"]):
-        sys.exit(f"Server '{args.name}' non attivo. Avvialo prima.")
-    url = f"http://127.0.0.1:{kb['port']}/query"
-    try:
-        r = requests.post(url, json={"query": args.question, "mode": args.mode}, timeout=300)
-        r.raise_for_status()
-        data = r.json()
-        res = data.get("response", data) if isinstance(data, dict) else str(data)
-        print(res)
-    except Exception as e:
-        sys.exit(f"Errore durante la query: {e}")
-
-
-def cmd_search(args):
-    path = Path("/Users/luca/Library/CloudStorage/OneDrive-Personale/BPEA/Rifiuti/rapportorifiutiurbani_2025.md")
-    if not path.exists():
-        sys.exit("File non trovato.")
-    query = args.query.lower()
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for idx, line in enumerate(f, 1):
-            if query in line.lower():
-                print(f"{idx}: {line.strip()[:150]}")
-
-
-def cmd_insert(args):
-    reg = load_registry()
-    kb = find_kb(reg, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
-    if not health(kb["port"]):
-        sys.exit(f"Server '{args.name}' non attivo.")
-    url = f"http://127.0.0.1:{kb['port']}/documents/text"
-    try:
-        r = requests.post(url, json={"text": args.text, "file_source": args.source}, timeout=300)
-        r.raise_for_status()
-        print("✓ Testo inserito con successo.")
-    except Exception as e:
-        sys.exit(f"Errore: {e}")
-
-
-def cmd_pipeline(args):
+def cmd_ingest_status(args):
     """Mostra lo stato del pipeline di estrazione (busy/idle, job corrente, ultimo messaggio)."""
     reg = load_registry()
     kb = find_kb(reg, args.name)
@@ -586,42 +664,187 @@ def cmd_pipeline(args):
             print(f"    {m}")
 
 
-def cmd_unstuck(args):
+def cmd_ingest_cancel(args):
     """Cancella il pipeline di estrazione in corso (POST /documents/cancel_pipeline).
     Usalo quando un'estrazione e' bloccata/troppo lenta (es. rate-limit LLM) e
     impedisce nuovi ingest con errore 409 Conflict. I documenti gia' completati
     restano PROCESSED, quelli in corso vengono marcati FAILED e si possono
-    rilanciare con un nuovo `ragcli ingest`."""
+    rilanciare con un nuovo `ragcli ingest run`."""
     reg = load_registry()
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     if not health(kb["port"]):
         sys.exit(f"Server '{args.name}' non attivo.")
-    r = requests.post(f"http://127.0.0.1:{kb['port']}/documents/cancel_pipeline", timeout=30)
-    r.raise_for_status()
-    d = r.json()
+    d = _cancel_pipeline(kb["port"])
     if d.get("status") == "not_busy":
         print(f"'{args.name}': pipeline già libero, niente da cancellare.")
     else:
         print(f"'{args.name}': cancellazione richiesta ({d.get('message', d.get('status'))}). "
-              f"Verifica con `ragcli pipeline {args.name}` che torni libero, poi rilancia l'ingest.")
+              f"Verifica con `ragcli ingest status {args.name}` che torni libero, poi rilancia l'ingest.")
 
 
-def cmd_kill_ingest(args):
-    import subprocess
-    r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
-    killed = False
-    for line in r.stdout.splitlines():
-        if "ingest.py" in line and "ps" not in line and "ragcli" not in line:
-            parts = line.split()
-            if len(parts) > 1:
-                pid = parts[1]
-                print(f"Killed orphan ingest.py pid: {pid}")
-                subprocess.run(["kill", "-9", pid])
-                killed = True
-    if not killed:
+def cmd_ingest_kill(args):
+    killed = _kill_orphan_ingest()
+    if killed:
+        for pid in killed:
+            print(f"Killed orphan ingest.py pid: {pid}")
+    else:
         print("No orphan ingest.py processes found.")
+
+
+def cmd_ingest_recover(args):
+    """Sequenza completa di recupero: cancella la pipeline bloccata e uccide
+    eventuali processi ingest.py orfani, poi suggerisce di rilanciare l'ingest."""
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    if health(kb["port"]):
+        try:
+            d = _cancel_pipeline(kb["port"])
+            if d.get("status") == "not_busy":
+                print(f"'{args.name}': pipeline già libero.")
+            else:
+                print(f"'{args.name}': cancellazione richiesta ({d.get('message', d.get('status'))}).")
+        except Exception as e:
+            print(f"  ⚠ cancellazione pipeline fallita: {e}")
+    else:
+        print(f"'{args.name}': server non attivo, salto la cancellazione pipeline.")
+    killed = _kill_orphan_ingest()
+    if killed:
+        print(f"  rimossi processi ingest.py orfani: {', '.join(killed)}")
+    else:
+        print("  nessun processo ingest.py orfano trovato.")
+    print(f"\n✓ Recovery completata. Rilancia con: ragcli ingest run {args.name}")
+
+
+# ---------------------------------------------------------------- query
+
+def cmd_query(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    if not health(kb["port"]):
+        sys.exit(f"Server '{args.name}' non attivo. Avvialo prima.")
+    url = f"http://127.0.0.1:{kb['port']}/query"
+    try:
+        r = requests.post(url, json={"query": args.question, "mode": args.mode}, timeout=300)
+        r.raise_for_status()
+        data = r.json()
+        res = data.get("response", data) if isinstance(data, dict) else str(data)
+        print(res)
+    except Exception as e:
+        sys.exit(f"Errore durante la query: {e}")
+
+
+def cmd_query_inspect(args):
+    """Mostra se una KB è pronta per essere interrogata: salute server,
+    quanti file sono stati ingeriti/indicizzati, stato della pipeline."""
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    kdir = kb_data_dir(kb)
+    up = health(kb["port"])
+    n_inputs = _count_files(kdir / "inputs")
+    n_storage = _count_files(kdir / "rag_storage")
+    print(f"KB                 : {kb['name']}")
+    print(f"server             : {'UP' if up else 'down'}  (:{kb['port']})")
+    print(f"file in inputs/    : {n_inputs if n_inputs is not None else 'n/a'}")
+    print(f"file in rag_storage: {n_storage if n_storage is not None else 'n/a'}")
+    if not up:
+        print("pipeline           : n/a (server non attivo)")
+        return
+    d = _pipeline_status(kb["port"])
+    if d is None:
+        print("pipeline           : err (richiesta fallita)")
+    else:
+        print(f"pipeline           : {'busy' if d.get('busy') else 'idle'}")
+
+
+# ---------------------------------------------------------------- mcp group
+
+def cmd_mcp_add(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    mcp_name = f"lightrag-{args.name}"
+    clients = list(mcp_clients.CLIENTS) if args.client == "all" else [args.client]
+    rc = 0
+    for client in clients:
+        if len(clients) > 1:
+            print(f"\n== {client} ==")
+        fn = mcp_clients.CLIENTS[client]
+        if fn(mcp_name, MCP_PYTHON, MCP_SCRIPT, args.name, args.print_only) != 0:
+            rc = 1
+    sys.exit(rc)
+
+
+def cmd_mcp_rm(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    mcp_name = f"lightrag-{args.name}"
+    clients = list(mcp_clients.REMOVERS) if args.client == "all" else [args.client]
+    rc = 0
+    for client in clients:
+        if len(clients) > 1:
+            print(f"\n== {client} ==")
+        fn = mcp_clients.REMOVERS[client]
+        try:
+            if fn(mcp_name) != 0:
+                rc = 1
+        except Exception as e:
+            print(f"Errore durante la de-registrazione da {client}: {e}")
+            rc = 1
+    sys.exit(rc)
+
+
+# ---------------------------------------------------------------- global status
+
+def cmd_status(args):
+    """Dashboard globale: per ogni KB, stato server, porta, provider, enabled e
+    stato della pipeline di ingest. Robusto a errori per singola KB: una KB che
+    non risponde non deve impedire di vedere lo stato delle altre."""
+    reg = load_registry()
+    if not reg["kbs"]:
+        print("Nessuna KB. Crea con: ragcli kb new <nome> <cartella>")
+        return
+    g = load_env(CONFIG)
+    print(f"{'NAME':<16}{'SERVER':<8}{'PORT':<7}{'PROVIDER':<12}{'EN':<4}PIPELINE")
+    for kb in reg["kbs"]:
+        try:
+            up = health(kb["port"])
+        except Exception:
+            up = False
+        prov = kb.get("provider", g.get("LLM_PROVIDER", "ollama"))
+        en = "yes" if kb.get("enabled", True) else "no"
+        if not up:
+            pipeline = "n/a"
+        else:
+            try:
+                d = _pipeline_status(kb["port"])
+                pipeline = ("busy" if d.get("busy") else "idle") if d is not None else "err"
+            except Exception:
+                pipeline = "err"
+        print(f"{kb['name']:<16}{'UP' if up else 'down':<8}{kb['port']:<7}{prov:<12}{en:<4}{pipeline}")
+
+
+# ---------------------------------------------------------------- legacy
+
+def cmd_search(args):
+    path = Path("/Users/luca/Library/CloudStorage/OneDrive-Personale/BPEA/Rifiuti/rapportorifiutiurbani_2025.md")
+    if not path.exists():
+        sys.exit("File non trovato.")
+    query = args.query.lower()
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for idx, line in enumerate(f, 1):
+            if query in line.lower():
+                print(f"{idx}: {line.strip()[:150]}")
 
 
 # ---------------------------------------------------------------- main
@@ -630,7 +853,11 @@ def main():
     p = argparse.ArgumentParser(prog="ragcli", description="Gestione KB LightRAG locali")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    c = sub.add_parser("create", help="crea una nuova KB da una cartella")
+    # -- kb --
+    kb_p = sub.add_parser("kb", help="gestione delle knowledge base")
+    kb_sub = kb_p.add_subparsers(dest="kb_cmd", required=True)
+
+    c = kb_sub.add_parser("new", help="crea una nuova KB da una cartella")
     c.add_argument("name")
     c.add_argument("source_folder")
     c.add_argument("--port", type=int)
@@ -643,95 +870,147 @@ def main():
                    help="dove salvare i dati della KB (default: <sorgente>/.lightrag)")
     c.add_argument("--local", action="store_true",
                    help="salva i dati in kb/<nome>/ dentro il progetto (vecchio comportamento)")
-    c.set_defaults(func=cmd_create)
+    c.set_defaults(func=cmd_kb_new)
 
-    c = sub.add_parser("migrate", help="sposta i dati di una KB nella sorgente (default <sorgente>/.lightrag)")
-    c.add_argument("name")
-    g_migrate = c.add_mutually_exclusive_group()
-    g_migrate.add_argument("--data-dir", dest="data_dir",
-                           help="posizione custom (default: <sorgente>/.lightrag)")
-    g_migrate.add_argument("--local", action="store_true",
-                           help="riporta i dati in kb/<nome>/ dentro il progetto (reciproco di create --local)")
-    c.set_defaults(func=cmd_migrate)
-
-    c = sub.add_parser("regen", help="rigenera l'.env da global.env (name o 'all')")
-    c.add_argument("name")
-    c.set_defaults(func=cmd_regen)
-
-    c = sub.add_parser("reset", help="azzera l'indice di una KB per ripartire da zero (preserva l'OCR)")
-    c.add_argument("name")
-    c.add_argument("--hard", action="store_true", help="cancella anche inputs/ (re-OCR completo)")
-    c.add_argument("--yes", "-y", action="store_true", help="non chiedere conferma")
-    c.set_defaults(func=cmd_reset)
-
-    c = sub.add_parser("delete", help="elimina una KB (de-registra MCP, rimuove dal registry; scegli se tenere o cancellare i dati)")
+    c = kb_sub.add_parser("rm", help="elimina una KB (de-registra MCP, rimuove dal registry; scegli se tenere o cancellare i dati)")
     c.add_argument("name")
     g_delete = c.add_mutually_exclusive_group(required=True)
     g_delete.add_argument("--keep-data", action="store_true", help="conserva rag_storage/, inputs/ su disco")
     g_delete.add_argument("--purge", action="store_true", help="cancella anche i dati indicizzati su disco")
     c.add_argument("--yes", "-y", action="store_true", help="non chiedere conferma")
-    c.set_defaults(func=cmd_delete)
+    c.set_defaults(func=cmd_kb_rm)
 
-    c = sub.add_parser("list", help="elenca le KB e il loro stato")
-    c.set_defaults(func=cmd_list)
+    c = kb_sub.add_parser("ls", help="elenca le KB e il loro stato")
+    c.set_defaults(func=cmd_kb_ls)
 
-    c = sub.add_parser("ingest", help="OCR + embedding della cartella della KB (sync a specchio)")
+    c = kb_sub.add_parser("info", help="dettagli completi di una KB (path, porta, stato, conteggio file)")
+    c.add_argument("name")
+    c.set_defaults(func=cmd_kb_info)
+
+    c = kb_sub.add_parser("move", help="sposta i dati di una KB nella sorgente (default <sorgente>/.lightrag)")
+    c.add_argument("name")
+    g_migrate = c.add_mutually_exclusive_group()
+    g_migrate.add_argument("--data-dir", dest="data_dir",
+                           help="posizione custom (default: <sorgente>/.lightrag)")
+    g_migrate.add_argument("--local", action="store_true",
+                           help="riporta i dati in kb/<nome>/ dentro il progetto (reciproco di kb new --local)")
+    c.set_defaults(func=cmd_kb_move)
+
+    c = kb_sub.add_parser("reset", help="azzera l'indice di una KB per ripartire da zero (preserva l'OCR)")
+    c.add_argument("name")
+    c.add_argument("--hard", action="store_true", help="cancella anche inputs/ (re-OCR completo)")
+    c.add_argument("--yes", "-y", action="store_true", help="non chiedere conferma")
+    c.set_defaults(func=cmd_kb_reset)
+
+    c = kb_sub.add_parser("regen", help="rigenera l'.env da global.env (name o 'all')")
+    c.add_argument("name")
+    c.set_defaults(func=cmd_kb_regen)
+
+    c = kb_sub.add_parser("enable", help="abilita una KB (inclusa in `server start all`)")
+    c.add_argument("name")
+    c.set_defaults(func=cmd_kb_enable)
+
+    c = kb_sub.add_parser("disable", help="disabilita una KB (esclusa da `server start all`)")
+    c.add_argument("name")
+    c.set_defaults(func=cmd_kb_disable)
+
+    c = kb_sub.add_parser("insert", help="inserisce testo personalizzato nella KB")
+    c.add_argument("name")
+    c.add_argument("text")
+    c.add_argument("--source", default="manual")
+    c.set_defaults(func=cmd_kb_insert)
+
+    # -- server --
+    server_p = sub.add_parser("server", help="gestione dei server lightrag")
+    server_sub = server_p.add_subparsers(dest="server_cmd", required=True)
+
+    for name, fn, helptext in [
+        ("start", cmd_server_start, "avvia il server (name o 'all')"),
+        ("stop", cmd_server_stop, "ferma il server (name o 'all')"),
+        ("restart", cmd_server_restart, "riavvia il server (name o 'all')"),
+    ]:
+        c = server_sub.add_parser(name, help=helptext)
+        c.add_argument("name")
+        c.set_defaults(func=fn)
+
+    c = server_sub.add_parser("status", help="riepilogo server + MCP")
+    c.set_defaults(func=cmd_server_status)
+
+    # -- ingest --
+    ingest_p = sub.add_parser("ingest", help="pipeline di estrazione (OCR + embedding)")
+    ingest_sub = ingest_p.add_subparsers(dest="ingest_cmd", required=True)
+
+    c = ingest_sub.add_parser("run", help="OCR + embedding della cartella della KB (sync a specchio, auto-correttivo)")
     c.add_argument("name")
     c.add_argument("--force", action="store_true", help="re-OCR di tutti i file")
     c.add_argument("--add", action="store_true", help="solo-aggiunta: non elimina nulla dal KB")
     c.add_argument("--background", "-b", action="store_true",
                    help="esegui in background (detached): puoi chiudere il terminale")
-    c.set_defaults(func=cmd_ingest)
+    c.set_defaults(func=cmd_ingest_run)
 
-    for name, fn, helptext in [
-        ("start", cmd_start, "avvia il server (name o 'all')"),
-        ("stop", cmd_stop, "ferma il server (name o 'all')"),
-        ("restart", cmd_restart, "riavvia il server (name o 'all')"),
-    ]:
-        c = sub.add_parser(name, help=helptext)
-        c.add_argument("name")
-        c.set_defaults(func=fn)
+    c = ingest_sub.add_parser("status", help="stato del pipeline di estrazione (busy/idle)")
+    c.add_argument("name")
+    c.add_argument("-v", "--verbose", action="store_true", help="mostra la cronologia messaggi")
+    c.add_argument("--lines", type=int, default=15, help="quante righe di cronologia mostrare (con -v)")
+    c.set_defaults(func=cmd_ingest_status)
 
-    c = sub.add_parser("mcp-add", help="registra l'MCP della KB in Claude Code, Claude Desktop, Codex o Antigravity")
+    c = ingest_sub.add_parser("cancel", help="cancella il pipeline di estrazione bloccato/lento (sblocca i 409)")
+    c.add_argument("name")
+    c.set_defaults(func=cmd_ingest_cancel)
+
+    c = ingest_sub.add_parser("kill", help="kill orphan ingest.py processes")
+    c.set_defaults(func=cmd_ingest_kill)
+
+    c = ingest_sub.add_parser("recover", help="cancella pipeline bloccata + uccide processi orfani, in un solo comando")
+    c.add_argument("name")
+    c.set_defaults(func=cmd_ingest_recover)
+
+    # -- mcp --
+    mcp_p = sub.add_parser("mcp", help="registrazione MCP nei client (Claude Code, Claude Desktop, Codex, Antigravity)")
+    mcp_sub = mcp_p.add_subparsers(dest="mcp_cmd", required=True)
+
+    c = mcp_sub.add_parser("add", help="registra l'MCP della KB in Claude Code, Claude Desktop, Codex o Antigravity")
     c.add_argument("name")
     c.add_argument("--client", choices=list(mcp_clients.CLIENTS) + ["all"], default="claude-code",
                     help="client di destinazione (default: claude-code)")
     c.add_argument("--print-only", action="store_true")
     c.set_defaults(func=cmd_mcp_add)
 
-    c = sub.add_parser("status", help="riepilogo server + MCP")
+    c = mcp_sub.add_parser("rm", help="de-registra l'MCP della KB da uno o tutti i client, senza eliminare la KB")
+    c.add_argument("name")
+    c.add_argument("--client", choices=list(mcp_clients.REMOVERS) + ["all"], default="claude-code",
+                    help="client da cui de-registrare (default: claude-code)")
+    c.set_defaults(func=cmd_mcp_rm)
+
+    # -- query (top-level): `ragcli query <name> <question>` oppure `ragcli query inspect <name>` --
+    query_p = sub.add_parser("query", help="invia una query alla KB, o ispeziona la sua prontezza con `query inspect <name>`")
+    query_p.add_argument("name", help="nome della KB, oppure 'inspect' seguito dal nome")
+    query_p.add_argument("rest", nargs="*", help=argparse.SUPPRESS)
+    query_p.add_argument("--mode", default="mix", choices=["mix", "local", "global", "hybrid", "naive"])
+    query_p.set_defaults(func=None)
+
+    # -- status (dashboard globale) --
+    c = sub.add_parser("status", help="dashboard globale: KB + server + porte + provider + pipeline")
     c.set_defaults(func=cmd_status)
 
-    c = sub.add_parser("query", help="invia una query alla KB")
-    c.add_argument("name")
-    c.add_argument("question")
-    c.add_argument("--mode", default="mix", choices=["mix", "local", "global", "hybrid", "naive"])
-    c.set_defaults(func=cmd_query)
-
-    c = sub.add_parser("search", help="cerca testo nel report 2025")
+    # -- search (legacy) --
+    c = sub.add_parser("search", help="cerca testo nel report 2025 (legacy, non legato alle KB)")
     c.add_argument("query")
     c.set_defaults(func=cmd_search)
 
-    c = sub.add_parser("insert", help="inserisce testo personalizzato nella KB")
-    c.add_argument("name")
-    c.add_argument("text")
-    c.add_argument("--source", default="manual")
-    c.set_defaults(func=cmd_insert)
-
-    c = sub.add_parser("kill-ingest", help="kill orphan ingest.py processes")
-    c.set_defaults(func=cmd_kill_ingest)
-
-    c = sub.add_parser("pipeline", help="stato del pipeline di estrazione (busy/idle)")
-    c.add_argument("name")
-    c.add_argument("-v", "--verbose", action="store_true", help="mostra la cronologia messaggi")
-    c.add_argument("--lines", type=int, default=15, help="quante righe di cronologia mostrare (con -v)")
-    c.set_defaults(func=cmd_pipeline)
-
-    c = sub.add_parser("unstuck", help="cancella il pipeline di estrazione bloccato/lento (sblocca i 409)")
-    c.add_argument("name")
-    c.set_defaults(func=cmd_unstuck)
-
     args = p.parse_args()
+
+    if args.cmd == "query":
+        if args.name == "inspect":
+            if not args.rest:
+                query_p.error("serve il nome della KB: `ragcli query inspect <name>`")
+            cmd_query_inspect(argparse.Namespace(name=args.rest[0]))
+        else:
+            if not args.rest:
+                query_p.error("serve la domanda: `ragcli query <name> <question>`")
+            cmd_query(argparse.Namespace(name=args.name, question=" ".join(args.rest), mode=args.mode))
+        return
+
     args.func(args)
 
 
