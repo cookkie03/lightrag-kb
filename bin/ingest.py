@@ -23,6 +23,7 @@ Cache incrementale su hash SHA-256: ri-OCR solo dei file cambiati.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import io
 import json
@@ -516,8 +517,19 @@ def main():
         except (ValueError, OSError):
             return False
 
+    # Esclusioni utente (campo `exclude` nel registry.yaml, gestito con
+    # `ragcli kb exclude add/rm/ls`): pattern fnmatch sul path relativo alla
+    # sorgente. `*` attraversa anche le sottocartelle (niente regole `**`
+    # speciali), quindi "Bozze/*" esclude un'intera cartella e "*.tmp" un'estensione.
+    exclude_patterns = kb.get("exclude", [])
+
+    def _is_excluded(p: Path) -> bool:
+        rel = p.relative_to(src).as_posix()
+        return any(fnmatch.fnmatch(rel, pat) for pat in exclude_patterns)
+
     candidates = [p for p in src.rglob("*")
-                  if p.is_file() and not p.name.startswith(".") and not _under_kdir(p)]
+                  if p.is_file() and not p.name.startswith(".") and not _under_kdir(p)
+                  and not _is_excluded(p)]
     files = [p for p in candidates if p.suffix.lower() in ALL_EXT]
     # ODF (odt/ods/odp...): Docling non li supporta -> segnalati, non saltati in silenzio.
     odf_files = [p for p in candidates if p.suffix.lower() in ODF_TO_OFFICE]

@@ -7,7 +7,7 @@ porta propria, working dir e input dir isolati, e un MCP server collegabile
 a Claude Code.
 
 Comandi raggruppati in stile docker/kubectl:
-  kb       gestione delle knowledge base (new, rm, ls, info, move, reset, regen, enable, disable, insert)
+  kb       gestione delle knowledge base (new, rm, ls, info, move, reset, regen, enable, disable, insert, exclude)
   server   gestione dei server lightrag (start, stop, restart, status)
   ingest   pipeline di estrazione (run, status, cancel, kill, recover)
   mcp      registrazione MCP nei client (add, rm)
@@ -423,6 +423,8 @@ def cmd_kb_info(args):
     print(f"provider        : {kb.get('provider', g.get('LLM_PROVIDER', 'ollama'))}")
     print(f"OCR backend     : {kb.get('ocr_backend', '-')}")
     print(f"abilitata       : {'sì' if kb.get('enabled', True) else 'no'}")
+    n_excl = len(kb.get("exclude", []))
+    print(f"esclusioni      : {n_excl} pattern (ragcli kb exclude ls {kb['name']})" if n_excl else "esclusioni      : nessuna")
     print(f"server          : {'UP' if up else ('avviato ma non risponde (PID ' + pid + ')' if pid else 'down')}")
     print(f"file in inputs/    : {n_inputs if n_inputs is not None else 'n/a (cartella assente)'}")
     print(f"file in rag_storage: {n_storage if n_storage is not None else 'n/a (cartella assente)'}")
@@ -446,6 +448,48 @@ def cmd_kb_disable(args):
     kb["enabled"] = False
     save_registry(reg)
     print(f"✓ KB '{args.name}' disabilitata (verrà saltata da `ragcli server start all`).")
+
+
+def cmd_kb_exclude_add(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    patterns = kb.setdefault("exclude", [])
+    if args.pattern in patterns:
+        print(f"· pattern già presente: {args.pattern}")
+        return
+    patterns.append(args.pattern)
+    save_registry(reg)
+    print(f"✓ esclusa da '{args.name}': {args.pattern}  (effettiva dal prossimo `ragcli ingest run`)")
+
+
+def cmd_kb_exclude_rm(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    patterns = kb.get("exclude", [])
+    if args.pattern not in patterns:
+        sys.exit(f"pattern non presente in '{args.name}': {args.pattern}")
+    patterns.remove(args.pattern)
+    if not patterns:
+        kb.pop("exclude", None)
+    save_registry(reg)
+    print(f"✓ rimossa esclusione da '{args.name}': {args.pattern}")
+
+
+def cmd_kb_exclude_ls(args):
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    patterns = kb.get("exclude", [])
+    if not patterns:
+        print(f"Nessuna esclusione per '{args.name}'.")
+        return
+    for pat in patterns:
+        print(f"  {pat}")
 
 
 def cmd_kb_insert(args):
@@ -914,6 +958,24 @@ def main():
     c.add_argument("name")
     c.set_defaults(func=cmd_kb_disable)
 
+    c = kb_sub.add_parser("exclude", help="gestisci i pattern di file/cartelle esclusi dall'ingest")
+    exclude_sub = c.add_subparsers(dest="exclude_cmd", required=True)
+
+    e = exclude_sub.add_parser("add", help="aggiungi un pattern fnmatch relativo alla sorgente "
+                                            "(es. 'Bozze/*' per una cartella, '*.tmp' per un'estensione)")
+    e.add_argument("name")
+    e.add_argument("pattern")
+    e.set_defaults(func=cmd_kb_exclude_add)
+
+    e = exclude_sub.add_parser("rm", help="rimuovi un pattern di esclusione")
+    e.add_argument("name")
+    e.add_argument("pattern")
+    e.set_defaults(func=cmd_kb_exclude_rm)
+
+    e = exclude_sub.add_parser("ls", help="elenca i pattern di esclusione di una KB")
+    e.add_argument("name")
+    e.set_defaults(func=cmd_kb_exclude_ls)
+
     c = kb_sub.add_parser("insert", help="inserisce testo personalizzato nella KB")
     c.add_argument("name")
     c.add_argument("text")
@@ -992,11 +1054,6 @@ def main():
     # -- status (dashboard globale) --
     c = sub.add_parser("status", help="dashboard globale: KB + server + porte + provider + pipeline")
     c.set_defaults(func=cmd_status)
-
-    # -- search (legacy) --
-    c = sub.add_parser("search", help="cerca testo nel report 2025 (legacy, non legato alle KB)")
-    c.add_argument("query")
-    c.set_defaults(func=cmd_search)
 
     args = p.parse_args()
 

@@ -18,3 +18,18 @@ kbs:
   ocr_backend: docling
   enabled: true
   data_dir: /Users/luca/Library/CloudStorage/SynologyDrive-Drive/Altro/.lightrag
+- name: trading-agent-wiki
+  source_folder: /Users/luca/Library/CloudStorage/OneDrive-Personale/trading-agent-wiki
+  port: 9622
+  ocr_backend: docling
+  enabled: true
+  data_dir: /Users/luca/Library/CloudStorage/OneDrive-Personale/trading-agent-wiki/.lightrag
+  exclude:
+  - .git
+  - .obsidian
+  - .agents
+  - .gemini
+  - GEMINI.md
+  - AGENTS.md
+  - grahify_out
+  - .pytest_cache
