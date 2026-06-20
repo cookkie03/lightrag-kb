@@ -1,5 +1,6 @@
 # Config con segreti (API key, token) — vedi config/global.env.example
 config/global.env
+config/registry.yaml
 
 # .env generati per-KB da `ragcli regen` (contengono percorsi locali, nessun segreto,
 # ma sono artefatti rigenerabili da global.env + registry.yaml)
