@@ -17,7 +17,7 @@ import yaml
 from fastmcp import FastMCP
 
 HOME = Path(__file__).resolve().parent.parent
-REGISTRY = HOME / "registry.yaml"
+REGISTRY = HOME / "config" / "registry.yaml"
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--kb", required=True)

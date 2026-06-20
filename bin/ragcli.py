@@ -2,7 +2,7 @@
 """ragcli — gestione knowledge base LightRAG locali (multi-KB).
 
 Usa il config centrale ~/lightrag-kb/config/global.env e il registro
-~/lightrag-kb/registry.yaml. Ogni KB ha un lightrag-server dedicato su
+~/lightrag-kb/config/registry.yaml. Ogni KB ha un lightrag-server dedicato su
 porta propria, working dir e input dir isolati, e un MCP server collegabile
 a Claude Code.
 """
@@ -24,7 +24,7 @@ import mcp_clients
 
 HOME = Path(__file__).resolve().parent.parent
 CONFIG = HOME / "config" / "global.env"
-REGISTRY = HOME / "registry.yaml"
+REGISTRY = HOME / "config" / "registry.yaml"
 KB_DIR = HOME / "kb"
 MCP_SCRIPT = HOME / "mcp" / "lightrag_mcp.py"
 INGEST_SCRIPT = HOME / "bin" / "ingest.py"
@@ -137,7 +137,7 @@ def write_kb_env(kb: dict, g: dict) -> Path:
 
     env_lines = [
         "# Generato da ragcli — NON editare a mano (usa `ragcli regen` dopo aver",
-        "# cambiato config/global.env). Override per-KB vanno nel registry.yaml.",
+        "# cambiato config/global.env). Override per-KB vanno nel config/registry.yaml.",
         f"# provider: {provider}",
         "HOST=127.0.0.1",
         f"PORT={kb['port']}",
@@ -196,7 +196,7 @@ def cmd_create(args):
         "name": args.name,
         "source_folder": str(src),
         "port": args.port or next_port(reg, g),
-        "ocr_backend": args.ocr or g.get("OCR_BACKEND", "mineru"),
+        "ocr_backend": args.ocr or g.get("OCR_BACKEND", "docling"),
         "enabled": True,
     }
     # Posizione dei dati della KB: default <sorgente>/.lightrag (vicino ai dati

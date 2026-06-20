@@ -38,7 +38,7 @@ import yaml
 
 HOME = Path(__file__).resolve().parent.parent
 CONFIG = HOME / "config" / "global.env"
-REGISTRY = HOME / "registry.yaml"
+REGISTRY = HOME / "config" / "registry.yaml"
 KB_DIR = HOME / "kb"
 
 
@@ -492,7 +492,7 @@ def main():
 
     src = Path(kb["source_folder"])
     port = kb["port"]
-    backend = kb.get("ocr_backend", g.get("OCR_BACKEND", "mineru"))
+    backend = kb.get("ocr_backend", g.get("OCR_BACKEND", "docling"))
     kdir = kb_data_dir(kb)
     inputs = kdir / "inputs"
     inputs.mkdir(parents=True, exist_ok=True)

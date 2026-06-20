@@ -16,7 +16,7 @@ perché contengono segreti/percorsi locali: non vanno committati. Allo stesso mo
 - **LightRAG** installato isolato come uv tool (`uv tool install "lightrag-hku[api]" --with ollama`).
 - **`bin/ragcli`** — CLI di gestione (in PATH via `~/.local/bin/ragcli`).
 - **`config/global.env`** — config centrale (modelli, OCR, porte). Modificala qui.
-- **`registry.yaml`** — elenco KB (editabile a mano).
+- **`config/registry.yaml`** — elenco KB (editabile a mano).
 - **`mcp/lightrag_mcp.py`** — MCP server per-KB (tool: `query`, `insert_text`, `kb_status`).
 - **`~/Documents/Scripts/lightrag-toggle.command`** — accende/spegne tutte le KB abilitate (doppio click).
 
@@ -110,7 +110,7 @@ Installazione modello Whisper MLX (nel venv condiviso): `uv pip install --python
 - Embedding: `nvidia/llama-nemotron-embed-vl-1b-v2:free` dim 2048 (`OPENROUTER_EMBEDDING_MODEL` / `OPENROUTER_EMBEDDING_DIM`)
 
 Per usare OpenRouter: imposta `OPENROUTER_API_KEY` in `global.env`, poi `ragcli create <nome> <cartella> --provider openrouter`.
-Per cambiare provider di una KB esistente: modifica `provider:` in `registry.yaml` e fai `ragcli regen <nome>`.
+Per cambiare provider di una KB esistente: modifica `provider:` in `config/registry.yaml` e fai `ragcli regen <nome>`.
 
 ## Riferimento completo — `config/global.env`
 Tutte le variabili lette da `ragcli` per generare l'`.env` di ogni KB (`write_kb_env` in `bin/ragcli.py`)
@@ -131,7 +131,7 @@ e per l'OCR in `bin/ingest.py`. Dopo una modifica: `ragcli regen <nome|all>`.
 | `OPENROUTER_LLM_MODEL` | `openrouter/owl-alpha` | modello LLM via OpenRouter |
 | `OPENROUTER_EMBEDDING_MODEL` | `nvidia/llama-nemotron-embed-vl-1b-v2:free` | modello embedding via OpenRouter |
 | `OPENROUTER_EMBEDDING_DIM` | `2048` | dimensione vettori embedding OpenRouter |
-| `OCR_BACKEND` | `mineru` | backend OCR di default (`mineru`\|`mineru-cloud`\|`glmocr`\|`docling`), override per-KB con `--ocr` |
+| `OCR_BACKEND` | `docling` | backend OCR di default (`mineru`\|`mineru-cloud`\|`glmocr`\|`docling`), override per-KB con `--ocr` |
 | `MINERU_API` | `http://127.0.0.1:8000` | endpoint mineru-api locale |
 | `MINERU_TIMEOUT` | `3600` | timeout richiesta mineru locale (secondi) |
 | `MINERU_CLOUD_API_KEY` | — | token API mineru.net (per backend `mineru-cloud`) |
