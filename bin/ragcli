@@ -1,0 +1,4 @@
+#!/bin/zsh
+# Wrapper per ragcli.py che usa il venv isolato della toolchain.
+HERE="${0:A:h}"
+exec "$HERE/../.venv-mcp/bin/python" "$HERE/ragcli.py" "$@"

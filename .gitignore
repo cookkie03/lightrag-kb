@@ -1,0 +1,24 @@
+# Config con segreti (API key, token) — vedi config/global.env.example
+config/global.env
+
+# .env generati per-KB da `ragcli regen` (contengono percorsi locali, nessun segreto,
+# ma sono artefatti rigenerabili da global.env + registry.yaml)
+kb/*/.env
+
+# Dati delle KB: documenti originali, OCR e storage del grafo/vettori (personali, pesanti)
+kb/*/inputs/
+kb/*/rag_storage/
+kb/*/.ocr_cache.json
+
+# Python
+__pycache__/
+*.pyc
+.venv-mcp/
+
+# macOS
+.DS_Store
+
+# Log e stato runtime locale
+kb/*/lightrag.log
+.claude/
+

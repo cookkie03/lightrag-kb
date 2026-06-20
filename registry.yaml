@@ -1,0 +1,20 @@
+# Registro delle knowledge base LightRAG (gestito da ragcli, editabile a mano).
+kbs:
+- name: riciclo
+  source_folder: /Users/luca/Library/CloudStorage/OneDrive-Personale/BPEA/Conai
+  port: 9621
+  ocr_backend: docling
+  enabled: true
+  provider: ollama
+- name: second-brain
+  source_folder: /Users/luca/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second-Brain
+  port: 9623
+  ocr_backend: docling
+  enabled: true
+  data_dir: /Users/luca/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second-Brain/.lightrag
+- name: legacy
+  source_folder: /Users/luca/Library/CloudStorage/SynologyDrive-Drive/Altro
+  port: 9624
+  ocr_backend: docling
+  enabled: true
+  data_dir: /Users/luca/Library/CloudStorage/SynologyDrive-Drive/Altro/.lightrag
