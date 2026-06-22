@@ -822,7 +822,8 @@ def cmd_mcp_add(args):
         if len(clients) > 1:
             print(f"\n== {client} ==")
         fn = mcp_clients.CLIENTS[client]
-        if fn(mcp_name, MCP_PYTHON, MCP_SCRIPT, args.name, args.print_only) != 0:
+        if fn(mcp_name, MCP_PYTHON, MCP_SCRIPT, args.name, args.print_only,
+              kb.get("source_folder")) != 0:
             rc = 1
     sys.exit(rc)
 
@@ -840,7 +841,7 @@ def cmd_mcp_rm(args):
             print(f"\n== {client} ==")
         fn = mcp_clients.REMOVERS[client]
         try:
-            if fn(mcp_name) != 0:
+            if fn(mcp_name, kb.get("source_folder")) != 0:
                 rc = 1
         except Exception as e:
             print(f"Errore durante la de-registrazione da {client}: {e}")

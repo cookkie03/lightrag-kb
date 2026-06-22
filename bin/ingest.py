@@ -256,11 +256,72 @@ _LOCALE_MAP = {
 }
 
 
+# Range Unicode tipici dei font PDF senza ToUnicode CMap: i caratteri vengono
+# rimappati dal renderer su glyph "decorativi" invece delle lettere vere
+# (visto su tesi LaTeX/Word con subset font). Soglia empirica: oltre il 15% di
+# caratteri alfabetici in questi range = testo nativo corrotto, non recuperabile
+# senza OCR completo della pagina (force_full_page_ocr).
+_GARBLED_RANGES = (
+    (0x2700, 0x27BF),  # Dingbats
+    (0x2580, 0x259F),  # Block Elements (capita su simboli di riempimento glifo)
+    (0xE000, 0xF8FF),  # Private Use Area
+    (0x1F0A0, 0x1F0FF),  # Playing Cards (altro uso comune come "font simbolico")
+)
+
+
+def _looks_garbled(text: str, threshold: float = 0.15) -> bool:
+    """True se la quota di caratteri da font simbolico/PUA (che sostituiscono
+    le lettere vere in un PDF con cmap rotta, no ToUnicode) supera la soglia
+    rispetto alle lettere reali: indica testo nativo illeggibile, da re-OCR'are
+    a piena pagina invece di fidarsi com'è.
+
+    Nota: questi caratteri NON sono riconosciuti come alfabetici da
+    str.isalpha() (sono dingbat/PUA), quindi vanno contati a parte e non
+    semplicemente esclusi da un filtro su isalpha()."""
+    real_letters = sum(1 for c in text if c.isalpha())
+    garbled = sum(
+        1 for c in text if any(lo <= ord(c) <= hi for lo, hi in _GARBLED_RANGES)
+    )
+    total = real_letters + garbled
+    if total < 50:
+        return False
+    return (garbled / total) > threshold
+
+
+def _docling_probe_text(path: Path, py: str, timeout: int) -> str:
+    """Estrazione rapida del testo nativo (no OCR) per il pre-check di qualità:
+    niente table structure / enrichment, solo per stimare se la cmap è rotta."""
+    code = (
+        "import sys\n"
+        "from docling.datamodel.base_models import InputFormat\n"
+        "from docling.datamodel.pipeline_options import PdfPipelineOptions\n"
+        "from docling.document_converter import DocumentConverter, PdfFormatOption\n"
+        "\n"
+        "opts = PdfPipelineOptions()\n"
+        "opts.do_ocr = False\n"
+        "opts.do_table_structure = False\n"
+        "\n"
+        "converter = DocumentConverter(\n"
+        "    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}\n"
+        ")\n"
+        "from pathlib import Path as _P\n"
+        f"doc = converter.convert(_P({str(path)!r}), page_range=(1, 5)).document\n"
+        "sys.stdout.write(doc.export_to_markdown())\n"
+    )
+    r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        return ""  # probe fallito: si procede comunque con l'OCR normale
+    return r.stdout
+
+
 def ocr_docling(path: Path, g: dict) -> str:
     """Esegue Docling in un sottoprocesso (venv ML dedicato), settato a massima
     qualità: table structure in modalità ACCURATE, risoluzione immagine
     raddoppiata, formula/code enrichment abilitati. OCR applicato solo dove
-    serve (pagine bitmap/scansionate), non forzato sul testo nativo.
+    serve (pagine bitmap/scansionate), non forzato sul testo nativo — a meno
+    che un pre-check sulle prime pagine riveli una cmap rotta (vedi
+    _looks_garbled), nel qual caso si forza l'OCR a piena pagina su tutto il
+    documento.
 
     OCR engine: ocrmac (Vision framework nativo Apple, via Neural Engine) invece
     di EasyOCR — su M4 misurato ~3x più rapido a parità (o leggero miglioramento)
@@ -272,6 +333,10 @@ def ocr_docling(path: Path, g: dict) -> str:
     langs = [l.strip() for l in g.get("DOCLING_LANG", "it,en").split(",") if l.strip()]
     locales = [_LOCALE_MAP.get(l, l) for l in langs]
     timeout = int(g.get("DOCLING_TIMEOUT", "3600"))
+
+    probe = _docling_probe_text(path, py, min(timeout, 120))
+    force_full_page = _looks_garbled(probe)
+
     code = (
         "import sys\n"
         "from docling.datamodel.base_models import InputFormat\n"
@@ -287,7 +352,9 @@ def ocr_docling(path: Path, g: dict) -> str:
         "opts.table_structure_options = TableStructureOptions(\n"
         "    do_cell_matching=True, mode=TableFormerMode.ACCURATE,\n"
         ")\n"
-        f"opts.ocr_options = OcrMacOptions(lang={locales!r}, recognition='accurate')\n"
+        "opts.ocr_options = OcrMacOptions(\n"
+        f"    lang={locales!r}, recognition='accurate', force_full_page_ocr={force_full_page!r},\n"
+        ")\n"
         "opts.images_scale = 2.0\n"
         "opts.do_formula_enrichment = True\n"
         "opts.do_code_enrichment = True\n"
