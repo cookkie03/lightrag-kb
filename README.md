@@ -5,9 +5,17 @@ integrate con Ollama, con OCR di PDF/immagini, ingest di Office/audio/video via 
 server per ogni KB collegabile a Claude Code.
 
 ## Setup
+Dopo il clone, esegui lo script di setup (macOS/Linux; su Windows usa WSL o Git Bash):
 ```bash
-cp config/global.env.example config/global.env   # poi inserisci le tue API key (OpenRouter, MinerU cloud)
+./setup.sh
 ```
+Fa tutto il necessario per avere `ragcli` funzionante da terminale:
+1. installa LightRAG isolato come uv tool (`lightrag-hku[api]` + ollama)
+2. crea il venv `.venv-mcp` e ci installa `requests`, `pyyaml`, `fastmcp` (richiesti da `ragcli`/MCP server)
+3. crea il symlink `~/.local/bin/ragcli -> bin/ragcli` (avvisa se `~/.local/bin` non è nel PATH)
+4. copia `config/global.env.example` in `config/global.env` se non esiste già
+
+Poi inserisci le tue API key (OpenRouter, MinerU cloud) in `config/global.env`.
 `config/global.env` e gli `.env` per-KB (`kb/<nome>/.env`, generati da `ragcli`) sono in `.gitignore`
 perché contengono segreti/percorsi locali: non vanno committati. Allo stesso modo i dati delle KB
 (`kb/<nome>/inputs/`, `kb/<nome>/rag_storage/`) sono esclusi perché contengono documenti personali.

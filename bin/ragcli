@@ -1,4 +1,10 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 # Wrapper per ragcli.py che usa il venv isolato della toolchain.
-HERE="${0:A:h}"
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+HERE="$(cd "$(dirname "$SOURCE")" && pwd)"
 exec "$HERE/../.venv-mcp/bin/python" "$HERE/ragcli.py" "$@"
