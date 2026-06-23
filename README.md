@@ -20,28 +20,40 @@ perché contengono segreti/percorsi locali: non vanno committati. Allo stesso mo
 - **`mcp/lightrag_mcp.py`** — MCP server per-KB (tool: `query`, `insert_text`, `kb_status`).
 - **`~/Documents/Scripts/lightrag-toggle.command`** — accende/spegne tutte le KB abilitate (doppio click).
 
-Ogni KB vive in `kb/<nome>/`: `rag_storage/` (grafo+vettori), `inputs/` (markdown OCR), `.env`, `.ocr_cache.json`.
+Di default i dati di ogni KB vivono accanto alla sorgente in `<sorgente>/.lightrag/`: `rag_storage/` (grafo+vettori), `inputs/` (markdown OCR), `.env`, `.ocr_cache.json`. Con `ragcli kb new --local` puoi mantenere il vecchio layout `kb/<nome>/` dentro al repo.
 
 ## Workflow tipico
 ```bash
-ragcli create miakb ~/percorso/cartella               # crea KB (provider: ollama, default)
-ragcli create miakb ~/percorso/cartella --provider openrouter  # oppure con OpenRouter
-ragcli start miakb                                    # avvia il server LightRAG
-ragcli ingest miakb                                   # OCR + embedding della cartella
-ragcli mcp-add miakb                                  # registra l'MCP in Claude Code
+ragcli kb new miakb ~/percorso/cartella                     # crea KB (provider: ollama, default)
+ragcli kb new miakb ~/percorso/cartella --provider openrouter  # oppure con OpenRouter
+ragcli ingest run miakb                                    # avvia server se serve + OCR + embedding
+ragcli ingest status miakb                                 # controlla stato e prossimo passo
+ragcli mcp add miakb                                       # registra l'MCP in Claude Code
 ```
 WebUI della KB: `http://127.0.0.1:<porta>` (documenti, query, grafo della conoscenza).
+
+## Workflow ingest
+`ragcli ingest` e` il punto di ingresso operativo per i casi quotidiani:
+
+- `ragcli ingest run <nome>`: fa partire il workflow standard. Se il server e` giu`, lo avvia; se la pipeline e` bloccata, prova a liberarla; se trova processi `ingest.py` orfani, li rimuove.
+- `ragcli ingest reset <nome>`: riparte da zero cancellando indice e cache ingest, ma preserva `inputs/` cosi` non devi rifare l'OCR. Con `--hard` cancella anche `inputs/`.
+- `ragcli ingest recover <nome>`: sblocca una pipeline busy e uccide eventuali processi orfani senza toccare l'indice.
+- `ragcli ingest status <nome>`: mostra se il server e` attivo, se la pipeline e` busy/idle, e suggerisce il prossimo comando utile.
 
 ## Comandi
 | Comando | Cosa fa |
 |---|---|
-| `ragcli create <nome> <cartella> [--port N] [--ocr mineru\|mineru-cloud\|glmocr\|docling] [--provider ollama\|openrouter] [--llm-model M] [--lang L]` | nuova KB |
-| `ragcli list` | elenco KB + stato |
-| `ragcli ingest <nome> [--force]` | OCR incrementale + embedding (`--force` = re-OCR tutto) |
-| `ragcli start\|stop\|restart <nome\|all>` | gestione server |
-| `ragcli mcp-add <nome> [--print-only]` | registra/mostra MCP per Claude Code |
-| `ragcli regen <nome\|all>` | rigenera l'.env dopo aver cambiato `global.env` |
-| `ragcli status` | riepilogo server + MCP |
+| `ragcli kb new <nome> <cartella> [--port N] [--ocr mineru\|mineru-cloud\|glmocr\|docling] [--provider ollama\|openrouter] [--llm-model M] [--lang L]` | nuova KB |
+| `ragcli kb ls` | elenco KB + stato |
+| `ragcli kb info <nome>` | dettagli completi di una KB |
+| `ragcli ingest run <nome> [--force] [-b]` | workflow operativo di ingest (`--force` = re-OCR tutto, `-b` = detached) |
+| `ragcli ingest reset <nome> [--hard]` | azzera l'indice; di default preserva l'OCR |
+| `ragcli ingest recover <nome>` | sblocca pipeline busy + processi `ingest.py` orfani |
+| `ragcli ingest status <nome>` | stato della pipeline con suggerimento del prossimo passo |
+| `ragcli server start\|stop\|restart <nome\|all>` | gestione server per uso amministrativo |
+| `ragcli mcp add <nome> [--print-only]` | registra/mostra MCP per Claude Code |
+| `ragcli kb regen <nome\|all>` | rigenera l'.env dopo aver cambiato `global.env` |
+| `ragcli status` | dashboard globale: KB + server + pipeline |
 
 ## OCR
 Backend selezionabile per KB con `--ocr` in fase di `create` (default: `OCR_BACKEND` in `global.env`).
@@ -109,12 +121,12 @@ Installazione modello Whisper MLX (nel venv condiviso): `uv pip install --python
 - LLM: `openrouter/owl-alpha` (`OPENROUTER_LLM_MODEL`)
 - Embedding: `nvidia/llama-nemotron-embed-vl-1b-v2:free` dim 2048 (`OPENROUTER_EMBEDDING_MODEL` / `OPENROUTER_EMBEDDING_DIM`)
 
-Per usare OpenRouter: imposta `OPENROUTER_API_KEY` in `global.env`, poi `ragcli create <nome> <cartella> --provider openrouter`.
-Per cambiare provider di una KB esistente: modifica `provider:` in `config/registry.yaml` e fai `ragcli regen <nome>`.
+Per usare OpenRouter: imposta `OPENROUTER_API_KEY` in `global.env`, poi `ragcli kb new <nome> <cartella> --provider openrouter`.
+Per cambiare provider di una KB esistente: modifica `provider:` in `config/registry.yaml` e fai `ragcli kb regen <nome>`.
 
 ## Riferimento completo — `config/global.env`
 Tutte le variabili lette da `ragcli` per generare l'`.env` di ogni KB (`write_kb_env` in `bin/ragcli.py`)
-e per l'OCR in `bin/ingest.py`. Dopo una modifica: `ragcli regen <nome|all>`.
+e per l'OCR in `bin/ingest.py`. Dopo una modifica: `ragcli kb regen <nome|all>`.
 
 | Variabile | Default | Cosa controlla |
 |---|---|---|
@@ -150,5 +162,5 @@ e per l'OCR in `bin/ingest.py`. Dopo una modifica: `ragcli regen <nome|all>`.
 
 ## Note
 - Rerank disabilitato: LightRAG supporta rerank solo via cohere/jina/aliyun, non via Ollama.
-- L'ingest richiede il server della KB attivo (ragcli lo avvia da solo se serve).
+- L'ingest richiede il server della KB attivo (`ragcli ingest run` lo avvia da solo se serve).
 - Dopo `ingest`, l'estrazione del grafo gira in background sul server; segui l'avanzamento nella WebUI.

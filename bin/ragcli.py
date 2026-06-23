@@ -7,19 +7,16 @@ porta propria, working dir e input dir isolati, e un MCP server collegabile
 a Claude Code.
 
 Comandi raggruppati in stile docker/kubectl:
-  kb       gestione delle knowledge base (new, rm, ls, info, move, reset, regen, enable, disable, insert, exclude)
+  kb       gestione delle knowledge base (new, rm, ls, info, move, regen, enable, disable, insert, exclude)
   server   gestione dei server lightrag (start, stop, restart, status)
-  ingest   pipeline di estrazione (run, status, cancel, kill, recover)
+  ingest   workflow di ingest (run, reset, status, cancel, kill, recover)
   mcp      registrazione MCP nei client (add, rm)
   query    interrogazione di una KB (top-level) + query inspect
   status   dashboard globale
-  search   comando legacy, non legato alle KB
 """
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import shutil
 import subprocess
 import sys
@@ -140,6 +137,10 @@ def _cancel_pipeline(port: int) -> dict:
     r = requests.post(f"http://127.0.0.1:{port}/documents/cancel_pipeline", timeout=30)
     r.raise_for_status()
     return r.json()
+
+
+def _print_ingest_next_step(name: str, hint: str) -> None:
+    print(f"  prossimo passo: {hint.format(name=name)}")
 
 
 # ---------------------------------------------------------------- .env gen
@@ -317,34 +318,38 @@ def cmd_kb_move(args):
     print(f"✓ KB '{args.name}' migrata. Rilancia: ragcli server start {args.name}")
 
 
-def cmd_kb_reset(args):
-    """Azzera l'indice di una KB per ripartire da zero (utile dopo run falliti o
-    stato incoerente). Di default PRESERVA l'OCR già fatto (cartella inputs/) e
-    cancella solo l'indice LightRAG (rag_storage/) e la cache locale di ingest:
-    così il re-ingest reinserisce tutto pulito riusando l'OCR. Con --hard
-    cancella anche inputs/ (re-OCR completo)."""
-    reg = load_registry()
-    kb = find_kb(reg, args.name)
-    if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+def _reset_kb_index(kb: dict, *, hard: bool, yes: bool, command_name: str) -> None:
     kdir = kb_data_dir(kb)
-    if not args.yes:
-        extra = " + inputs/ (re-OCR)" if args.hard else " (preservo inputs/ OCR)"
-        resp = input(f"Azzero l'indice di '{args.name}'{extra}. Confermi? [y/N] ")
+    if not yes:
+        extra = " + inputs/ (re-OCR)" if hard else " (preservo inputs/ OCR)"
+        resp = input(f"Azzero l'indice di '{kb['name']}'{extra}. Confermi? [y/N] ")
         if resp.strip().lower() not in ("y", "yes", "s", "si"):
             print("Annullato.")
             return
     if port_pid(kb["port"]):
         _stop_one(kb)
     targets = [kdir / "rag_storage", kdir / ".ocr_cache.json"]
-    if args.hard:
+    if hard:
         targets.append(kdir / "inputs")
     for t in targets:
         if t.is_dir():
             shutil.rmtree(t, ignore_errors=True)
         elif t.exists():
             t.unlink()
-    print(f"✓ KB '{args.name}' azzerata. Rilancia: ragcli server start {args.name} && ragcli ingest run {args.name}")
+    print(f"✓ Ingest reset di '{kb['name']}' completato.")
+    detail = "  rimossi indice, cache ingest e OCR salvato." if hard else "  rimossi indice e cache ingest; OCR preservato."
+    print(detail)
+    _print_ingest_next_step(kb["name"], command_name)
+
+
+def cmd_kb_reset(args):
+    """Compatibilità legacy: reindirizza al workflow operativo sotto `ingest`."""
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    print("Nota: `ragcli kb reset` è deprecato; usa `ragcli ingest reset`.")
+    _reset_kb_index(kb, hard=args.hard, yes=args.yes, command_name="ragcli ingest run {name}")
 
 
 def cmd_kb_rm(args):
@@ -681,9 +686,19 @@ def cmd_ingest_run(args):
         print(f"  puoi chiudere il terminale.")
         print(f"  log    : {log}")
         print(f"  segui  : tail -f {log}")
-        print(f"  stato  : ragcli ingest status {args.name}")
+        _print_ingest_next_step(args.name, "ragcli ingest status {name}")
         return
     sys.exit(subprocess.call(cmd))
+
+
+def cmd_ingest_reset(args):
+    """Azzera l'indice di ingest per ripartire da zero preservando di default
+    l'OCR già salvato in inputs/. Con --hard rimuove anche inputs/."""
+    reg = load_registry()
+    kb = find_kb(reg, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    _reset_kb_index(kb, hard=args.hard, yes=args.yes, command_name="ragcli ingest run {name}")
 
 
 def cmd_ingest_status(args):
@@ -693,16 +708,20 @@ def cmd_ingest_status(args):
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     if not health(kb["port"]):
-        sys.exit(f"Server '{args.name}' non attivo.")
+        print(f"'{args.name}': server non attivo.")
+        _print_ingest_next_step(args.name, "ragcli ingest run {name}")
+        return
     r = requests.get(f"http://127.0.0.1:{kb['port']}/documents/pipeline_status", timeout=30)
     r.raise_for_status()
     d = r.json()
     if not d.get("busy"):
         print(f"'{args.name}': pipeline libero (non sta processando nulla).")
+        _print_ingest_next_step(args.name, "ragcli ingest run {name}")
         return
     print(f"'{args.name}': pipeline OCCUPATO")
     print(f"  job: {d.get('job_name')}  (avviato: {d.get('job_start')})")
     print(f"  ultimo messaggio: {d.get('latest_message')}")
+    _print_ingest_next_step(args.name, "ragcli ingest recover {name}")
     if args.verbose:
         for m in d.get("history_messages", [])[-args.lines:]:
             print(f"    {m}")
@@ -723,6 +742,7 @@ def cmd_ingest_cancel(args):
     d = _cancel_pipeline(kb["port"])
     if d.get("status") == "not_busy":
         print(f"'{args.name}': pipeline già libero, niente da cancellare.")
+        _print_ingest_next_step(args.name, "ragcli ingest run {name}")
     else:
         print(f"'{args.name}': cancellazione richiesta ({d.get('message', d.get('status'))}). "
               f"Verifica con `ragcli ingest status {args.name}` che torni libero, poi rilancia l'ingest.")
@@ -878,20 +898,6 @@ def cmd_status(args):
                 pipeline = "err"
         print(f"{kb['name']:<16}{'UP' if up else 'down':<8}{kb['port']:<7}{prov:<12}{en:<4}{pipeline}")
 
-
-# ---------------------------------------------------------------- legacy
-
-def cmd_search(args):
-    path = Path("/Users/luca/Library/CloudStorage/OneDrive-Personale/BPEA/Rifiuti/rapportorifiutiurbani_2025.md")
-    if not path.exists():
-        sys.exit("File non trovato.")
-    query = args.query.lower()
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for idx, line in enumerate(f, 1):
-            if query in line.lower():
-                print(f"{idx}: {line.strip()[:150]}")
-
-
 # ---------------------------------------------------------------- main
 
 def main():
@@ -941,7 +947,7 @@ def main():
                            help="riporta i dati in kb/<nome>/ dentro il progetto (reciproco di kb new --local)")
     c.set_defaults(func=cmd_kb_move)
 
-    c = kb_sub.add_parser("reset", help="azzera l'indice di una KB per ripartire da zero (preserva l'OCR)")
+    c = kb_sub.add_parser("reset", help="deprecato: usa `ragcli ingest reset`")
     c.add_argument("name")
     c.add_argument("--hard", action="store_true", help="cancella anche inputs/ (re-OCR completo)")
     c.add_argument("--yes", "-y", action="store_true", help="non chiedere conferma")
@@ -1000,7 +1006,7 @@ def main():
     c.set_defaults(func=cmd_server_status)
 
     # -- ingest --
-    ingest_p = sub.add_parser("ingest", help="pipeline di estrazione (OCR + embedding)")
+    ingest_p = sub.add_parser("ingest", help="workflow operativo di ingest (OCR + embedding)")
     ingest_sub = ingest_p.add_subparsers(dest="ingest_cmd", required=True)
 
     c = ingest_sub.add_parser("run", help="OCR + embedding della cartella della KB (sync a specchio, auto-correttivo)")
@@ -1010,6 +1016,12 @@ def main():
     c.add_argument("--background", "-b", action="store_true",
                    help="esegui in background (detached): puoi chiudere il terminale")
     c.set_defaults(func=cmd_ingest_run)
+
+    c = ingest_sub.add_parser("reset", help="azzera l'indice per ripartire da zero (preserva l'OCR)")
+    c.add_argument("name")
+    c.add_argument("--hard", action="store_true", help="cancella anche inputs/ (re-OCR completo)")
+    c.add_argument("--yes", "-y", action="store_true", help="non chiedere conferma")
+    c.set_defaults(func=cmd_ingest_reset)
 
     c = ingest_sub.add_parser("status", help="stato del pipeline di estrazione (busy/idle)")
     c.add_argument("name")
