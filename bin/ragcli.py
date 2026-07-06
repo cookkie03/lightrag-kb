@@ -133,6 +133,29 @@ def _kill_orphan_ingest() -> list[str]:
     return killed
 
 
+def _kill_kb_ingest(name: str) -> list[str]:
+    """Killa qualunque processo ingest.py in corso per QUESTA kb (--kb <name>), lanciato
+    da ragcli o meno. Usato da `kb disable` per garantire che nessun ingest sopravviva
+    allo spegnimento. Ritorna i PID uccisi."""
+    r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+    killed = []
+    needles = (f"--kb {name}", f"--kb={name}")
+    for line in r.stdout.splitlines():
+        if "ingest.py" in line and any(n in line for n in needles):
+            parts = line.split()
+            if len(parts) > 1:
+                pid = parts[1]
+                subprocess.run(["kill", "-9", pid])
+                killed.append(pid)
+    return killed
+
+
+def _ensure_enabled(kb: dict) -> None:
+    """Blocca l'operazione se la KB è disabilitata (`ragcli kb disable`)."""
+    if not kb.get("enabled", True):
+        sys.exit(f"KB '{kb['name']}' è disabilitata. Riabilitala con: ragcli kb enable {kb['name']}")
+
+
 def _cancel_pipeline(port: int) -> dict:
     r = requests.post(f"http://127.0.0.1:{port}/documents/cancel_pipeline", timeout=30)
     r.raise_for_status()
@@ -442,17 +465,33 @@ def cmd_kb_enable(args):
         sys.exit(f"KB '{args.name}' non trovata.")
     kb["enabled"] = True
     save_registry(reg)
-    print(f"✓ KB '{args.name}' abilitata (verrà inclusa in `ragcli server start all`).")
+    print(f"✓ KB '{args.name}' riabilitata (query, ingest e MCP tornano operativi).")
+    print(f"  avviala con: ragcli server start {args.name}")
 
 
 def cmd_kb_disable(args):
+    """Spegne la KB: server fermato, pipeline/ingest in corso cancellati, e da questo
+    momento query/ingest/insert/server-start/MCP la rifiutano finché non torna `enable`."""
     reg = load_registry()
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     kb["enabled"] = False
-    save_registry(reg)
-    print(f"✓ KB '{args.name}' disabilitata (verrà saltata da `ragcli server start all`).")
+    save_registry(reg)  # subito, così il blocco è attivo anche se lo stop sotto fallisce
+
+    if health(kb["port"]):
+        _ensure_pipeline_free(kb)
+    if port_pid(kb["port"]):
+        _stop_one(kb)
+    else:
+        print(f"  '{kb['name']}' già spenta")
+
+    killed = _kill_kb_ingest(args.name)
+    if killed:
+        print(f"  uccisi processi ingest.py di '{args.name}': {', '.join(killed)}")
+
+    print(f"✓ KB '{args.name}' disabilitata: server fermato, ingest bloccati.")
+    print(f"  query/ingest/insert/mcp la rifiuteranno finché non lanci: ragcli kb enable {args.name}")
 
 
 def cmd_kb_exclude_add(args):
@@ -502,6 +541,7 @@ def cmd_kb_insert(args):
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
+    _ensure_enabled(kb)
     if not health(kb["port"]):
         sys.exit(f"Server '{args.name}' non attivo.")
     url = f"http://127.0.0.1:{kb['port']}/documents/text"
@@ -572,11 +612,15 @@ def _start_one(kb, g):
 def cmd_server_start(args):
     reg = load_registry()
     g = load_env(CONFIG)
-    targets = ([k for k in reg["kbs"] if k.get("enabled", True)]
-               if args.name == "all" else [find_kb(reg, args.name)])
-    for kb in targets:
+    if args.name == "all":
+        targets = [k for k in reg["kbs"] if k.get("enabled", True)]
+    else:
+        kb = find_kb(reg, args.name)
         if not kb:
             sys.exit(f"KB '{args.name}' non trovata.")
+        _ensure_enabled(kb)
+        targets = [kb]
+    for kb in targets:
         _start_one(kb, g)
 
 
@@ -652,6 +696,7 @@ def cmd_ingest_run(args):
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
+    _ensure_enabled(kb)
     if not health(kb["port"]):
         print(f"Server '{kb['name']}' non attivo: lo avvio…")
         _start_one(kb, g)
@@ -707,6 +752,7 @@ def cmd_ingest_status(args):
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
+    _ensure_enabled(kb)
     if not health(kb["port"]):
         print(f"'{args.name}': server non attivo.")
         _print_ingest_next_step(args.name, "ragcli ingest run {name}")
@@ -737,6 +783,7 @@ def cmd_ingest_cancel(args):
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
+    _ensure_enabled(kb)
     if not health(kb["port"]):
         sys.exit(f"Server '{args.name}' non attivo.")
     d = _cancel_pipeline(kb["port"])
@@ -764,6 +811,7 @@ def cmd_ingest_recover(args):
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
+    _ensure_enabled(kb)
     if health(kb["port"]):
         try:
             d = _cancel_pipeline(kb["port"])
@@ -790,6 +838,7 @@ def cmd_query(args):
     kb = find_kb(reg, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
+    _ensure_enabled(kb)
     if not health(kb["port"]):
         sys.exit(f"Server '{args.name}' non attivo. Avvialo prima.")
     url = f"http://127.0.0.1:{kb['port']}/query"
@@ -957,11 +1006,12 @@ def main():
     c.add_argument("name")
     c.set_defaults(func=cmd_kb_regen)
 
-    c = kb_sub.add_parser("enable", help="abilita una KB (inclusa in `server start all`)")
+    c = kb_sub.add_parser("enable", help="riattiva una KB spenta con `disable` (torna interrogabile/ingeribile)")
     c.add_argument("name")
     c.set_defaults(func=cmd_kb_enable)
 
-    c = kb_sub.add_parser("disable", help="disabilita una KB (esclusa da `server start all`)")
+    c = kb_sub.add_parser("disable", help="spegne completamente una KB: ferma il server, cancella ingest in corso, "
+                                           "e blocca query/ingest/insert/server-start/MCP finché non fai `enable`")
     c.add_argument("name")
     c.set_defaults(func=cmd_kb_disable)
 

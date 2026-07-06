@@ -37,25 +37,16 @@ def _merge_json_mcp_server(path: Path, mcp_name: str, entry: dict, print_only: b
 
 def add_claude_code(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
                      source_folder: Path | None = None) -> int:
-    cwd = Path(source_folder) if source_folder else None
-    if cwd and cwd.is_dir():
-        cmd = ["claude", "mcp", "add", "--scope", "project", mcp_name,
-               "--", str(python), str(script), "--kb", kb_name]
-        print(f"Comando di registrazione (progetto locale: {cwd}):\n  " + " ".join(cmd))
-        if print_only:
-            return 0
-        rc = subprocess.call(cmd, cwd=cwd)
-        if rc == 0:
-            print(f"✓ MCP '{mcp_name}' registrato in {cwd}/.mcp.json (scope project). "
-                  f"Verifica con /mcp in Claude Code aprendo quel progetto.")
-        return rc
-    cmd = ["claude", "mcp", "add", mcp_name, "--", str(python), str(script), "--kb", kb_name]
-    print("Cartella sorgente della KB non trovata, registro globalmente.\nComando di registrazione:\n  " + " ".join(cmd))
+    cwd = Path.cwd()
+    cmd = ["claude", "mcp", "add", "--scope", "project", mcp_name,
+           "--", str(python), str(script), "--kb", kb_name]
+    print(f"Comando di registrazione (progetto locale: {cwd}):\n  " + " ".join(cmd))
     if print_only:
         return 0
-    rc = subprocess.call(cmd)
+    rc = subprocess.call(cmd, cwd=cwd)
     if rc == 0:
-        print(f"✓ MCP '{mcp_name}' registrato in Claude Code. Verifica con /mcp in Claude Code.")
+        print(f"✓ MCP '{mcp_name}' registrato in {cwd}/.mcp.json (scope project). "
+              f"Verifica con /mcp in Claude Code aprendo quel progetto.")
     return rc
 
 
@@ -117,8 +108,8 @@ def _remove_json_mcp_server(path: Path, mcp_name: str) -> int:
 
 
 def remove_claude_code(mcp_name: str, source_folder: Path | None = None) -> int:
-    cwd = Path(source_folder) if source_folder else None
-    if cwd and cwd.is_dir() and (cwd / ".mcp.json").exists():
+    cwd = Path.cwd()
+    if (cwd / ".mcp.json").exists():
         cmd = ["claude", "mcp", "remove", "--scope", "project", mcp_name]
         print(f"Comando di de-registrazione (progetto locale: {cwd}):\n  " + " ".join(cmd))
         try:
@@ -132,7 +123,7 @@ def remove_claude_code(mcp_name: str, source_folder: Path | None = None) -> int:
             print(f"Errore durante la rimozione da Claude Code: {e}")
             return 1
     cmd = ["claude", "mcp", "remove", mcp_name]
-    print("Comando di de-registrazione:\n  " + " ".join(cmd))
+    print("Nessun .mcp.json nella directory corrente; rimozione dal registro globale.\nComando di de-registrazione:\n  " + " ".join(cmd))
     try:
         rc = subprocess.call(cmd)
         if rc == 0:

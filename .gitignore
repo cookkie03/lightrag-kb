@@ -7,9 +7,7 @@ config/registry.yaml
 kb/*/.env
 
 # Dati delle KB: documenti originali, OCR e storage del grafo/vettori (personali, pesanti)
-kb/*/inputs/
-kb/*/rag_storage/
-kb/*/.ocr_cache.json
+kb
 
 # Python
 __pycache__/
@@ -22,5 +20,7 @@ __pycache__/
 # Log e stato runtime locale
 kb/*/lightrag.log
 .claude/
+.codex
 
 .serena
+.tokensave
