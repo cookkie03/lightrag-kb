@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "agy": {
+      "source": "cookkie03/skills",
+      "sourceType": "github",
+      "skillPath": "agy/SKILL.md",
+      "computedHash": "62144d0dcd6600f87efba3bad207d07bfa65bdf63d32009f268b2d13b80bce18"
+    }
+  }
+}

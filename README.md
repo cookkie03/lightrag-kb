@@ -1,174 +1,163 @@
-# LightRAG-KB — RAG locale multi-knowledge-base
+# LightRAG-KB
 
-Tool per creare più knowledge base RAG locali con [LightRAG](https://github.com/hkuds/lightrag),
-integrate con Ollama, con OCR di PDF/immagini, ingest di Office/audio/video via Docling, e un MCP
-server per ogni KB collegabile a Claude Code.
+CLI minimale per gestire knowledge base LightRAG locali con:
+
+- WebUI come superficie principale per gli umani
+- MCP query-only per coding agent
+- un solo runtime Python condiviso per `ragcli`, `lightrag-server`, LightRAG e Docling
+- ingest incrementale dalla cartella sorgente reale
+
+## Modello operativo
+
+Per ogni KB:
+
+- `source_dir` contiene i file originali da indicizzare
+- `source_dir/.lightrag/rag_storage/` contiene lo storage interno LightRAG
+- `source_dir/.lightrag/derived/` contiene gli artefatti Docling prodotti da noi
+
+Layout standard:
+
+```text
+<source_dir>/.lightrag/
+  .env
+  derived/
+    text/
+    pdf/
+    images/
+    office/
+    audio/
+    cache/
+    manifests/
+  rag_storage/
+```
+
+Il server parte sempre con:
+
+```bash
+lightrag-server --input-dir <source_dir> --working-dir <source_dir>/.lightrag/rag_storage --port <port>
+```
+
+`ragcli start` è l’unico comando della CLI che avvia il server. `ingest` e MCP non fanno auto-start.
 
 ## Setup
-Dopo il clone, esegui lo script di setup (macOS/Linux; su Windows usa WSL o Git Bash):
+
+Dopo il clone:
+
 ```bash
 ./setup.sh
 ```
-Fa tutto il necessario per avere `ragcli` funzionante da terminale:
-1. installa LightRAG isolato come uv tool (`lightrag-hku[api]` + ollama)
-2. crea il venv `.venv-mcp` e ci installa `requests`, `pyyaml`, `fastmcp` (richiesti da `ragcli`/MCP server)
-3. crea il symlink `~/.local/bin/ragcli -> bin/ragcli` (avvisa se `~/.local/bin` non è nel PATH)
-4. copia `config/global.env.example` in `config/global.env` se non esiste già
 
-Poi inserisci le tue API key (OpenRouter, MinerU cloud) in `config/global.env`.
-`config/global.env` e gli `.env` per-KB (`kb/<nome>/.env`, generati da `ragcli`) sono in `.gitignore`
-perché contengono segreti/percorsi locali: non vanno committati. Allo stesso modo i dati delle KB
-(`kb/<nome>/inputs/`, `kb/<nome>/rag_storage/`) sono esclusi perché contengono documenti personali.
+Lo script:
 
-## Componenti
-- **LightRAG** installato isolato come uv tool (`uv tool install "lightrag-hku[api]" --with ollama`).
-- **`bin/ragcli`** — CLI di gestione (in PATH via `~/.local/bin/ragcli`).
-- **`config/global.env`** — config centrale (modelli, OCR, porte). Modificala qui.
-- **`config/registry.yaml`** — elenco KB (editabile a mano).
-- **`mcp/lightrag_mcp.py`** — MCP server per-KB (tool: `query`, `insert_text`, `kb_status`).
-- **`~/Documents/Scripts/lightrag-toggle.command`** — accende/spegne tutte le KB abilitate (doppio click).
+1. crea `.venv-engine`
+2. installa lì `lightrag-hku[api]`, `ollama`, `docling[asr,ocrmac,easyocr]`, `fastmcp`, `requests`, `pyyaml`
+3. crea i symlink:
+   - `~/.local/bin/ragcli`
+   - `~/.local/bin/lightrag-server`
+4. crea `config/global.env` da `config/global.env.example` se mancante
 
-Di default i dati di ogni KB vivono accanto alla sorgente in `<sorgente>/.lightrag/`: `rag_storage/` (grafo+vettori), `inputs/` (markdown OCR), `.env`, `.ocr_cache.json`. Con `ragcli kb new --local` puoi mantenere il vecchio layout `kb/<nome>/` dentro al repo.
+## CLI pubblica
 
-## Workflow tipico
 ```bash
-ragcli kb new miakb ~/percorso/cartella                     # crea KB (provider: ollama, default)
-ragcli kb new miakb ~/percorso/cartella --provider openrouter  # oppure con OpenRouter
-ragcli ingest run miakb                                    # avvia server se serve + OCR + embedding
-ragcli ingest status miakb                                 # controlla stato e prossimo passo
-ragcli mcp add miakb                                       # registra l'MCP in Claude Code
-```
-WebUI della KB: `http://127.0.0.1:<porta>` (documenti, query, grafo della conoscenza).
-
-## Workflow ingest
-`ragcli ingest` e` il punto di ingresso operativo per i casi quotidiani:
-
-- `ragcli ingest run <nome>`: fa partire il workflow standard. Se il server e` giu`, lo avvia; se la pipeline e` bloccata, prova a liberarla; se trova processi `ingest.py` orfani, li rimuove.
-- `ragcli ingest reset <nome>`: riparte da zero cancellando indice e cache ingest, ma preserva `inputs/` cosi` non devi rifare l'OCR. Con `--hard` cancella anche `inputs/`.
-- `ragcli ingest recover <nome>`: sblocca una pipeline busy e uccide eventuali processi orfani senza toccare l'indice.
-- `ragcli ingest status <nome>`: mostra se il server e` attivo, se la pipeline e` busy/idle, e suggerisce il prossimo comando utile.
-
-## Comandi
-| Comando | Cosa fa |
-|---|---|
-| `ragcli kb new <nome> <cartella> [--port N] [--ocr mineru\|mineru-cloud\|glmocr\|docling] [--provider ollama\|openrouter] [--llm-model M] [--lang L]` | nuova KB |
-| `ragcli kb ls` | elenco KB + stato |
-| `ragcli kb info <nome>` | dettagli completi di una KB |
-| `ragcli ingest run <nome> [--force] [-b]` | workflow operativo di ingest (`--force` = re-OCR tutto, `-b` = detached) |
-| `ragcli ingest reset <nome> [--hard]` | azzera l'indice; di default preserva l'OCR |
-| `ragcli ingest recover <nome>` | sblocca pipeline busy + processi `ingest.py` orfani |
-| `ragcli ingest status <nome>` | stato della pipeline con suggerimento del prossimo passo |
-| `ragcli server start\|stop\|restart <nome\|all>` | gestione server per uso amministrativo |
-| `ragcli mcp add <nome> [--print-only]` | registra/mostra MCP per Claude Code |
-| `ragcli kb regen <nome\|all>` | rigenera l'.env dopo aver cambiato `global.env` |
-| `ragcli status` | dashboard globale: KB + server + pipeline |
-
-## OCR
-Backend selezionabile per KB con `--ocr` in fase di `create` (default: `OCR_BACKEND` in `global.env`).
-
-- **mineru** (default): usa `mineru-api` locale su :8000 — accendilo col `mineru-toggle.command`. Endpoint `/file_parse`.
-- **mineru-cloud**: API cloud [mineru.net](https://mineru.net) (veloce, richiede token/quota); fallback automatico su `mineru` locale in caso di errore.
-- **glmocr**: usa la skill `glm-ocr` via Ollama, tutto locale (nessun servizio). Per-KB con `--ocr glmocr`.
-- **docling**: usa [Docling](https://docling-project.github.io/docling/) (IBM), tutto locale (nessun servizio), settato a **massima qualità** (vedi sotto). Per-KB con `--ocr docling`.
-
-Ingest incrementale: re-OCR solo dei file modificati (hash in `.ocr_cache.json`). I markdown OCR-izzati
-sono salvati in `kb/<nome>/inputs/` per ispezione.
-
-### Docling — impostazioni massima qualità
-Eseguito in sottoprocesso nel venv ML condiviso (`DOCLING_PYTHON`, di default lo stesso di `glmocr`).
-Pipeline configurata in `bin/ingest.py::ocr_docling` secondo la
-[documentazione ufficiale](https://docling-project.github.io/docling/usage/) per privilegiare la qualità sulla velocità:
-
-| Opzione Docling | Valore | Effetto |
-|---|---|---|
-| `do_ocr` | `True` | abilita l'OCR su PDF/immagini scansionate |
-| `ocr_options` | `EasyOcrOptions(lang=[...])` | OCR applicato solo su pagine/bitmap effettivamente scansionati; il testo nativo del PDF viene usato direttamente (più rapido, nessuna perdita di qualità) |
-| `do_table_structure` | `True` | estrazione/ricostruzione struttura tabelle |
-| `table_structure_options.mode` | `TableFormerMode.ACCURATE` | modalità tabelle più precisa (vs `FAST`) |
-| `table_structure_options.do_cell_matching` | `True` | allinea le celle rilevate al contenuto testuale |
-| `images_scale` | `2.0` | rendering pagina a risoluzione doppia → OCR più preciso su scansioni |
-| `do_formula_enrichment` | `True` | riconoscimento formule matematiche → LaTeX |
-| `do_code_enrichment` | `True` | riconoscimento dedicato dei blocchi di codice |
-
-Config in `global.env`:
-- `DOCLING_PYTHON` — python del venv con `docling` + `easyocr` installati (default `/Users/luca/.venv/bin/python`)
-- `DOCLING_LANG` — lingue OCR EasyOCR, comma-separated (default `it,en`)
-- `DOCLING_TIMEOUT` — timeout sottoprocesso in secondi (default `3600`)
-
-Installazione (nel venv condiviso): `uv pip install --python /Users/luca/.venv/bin/python docling easyocr`.
-
-### Office, audio/video — sempre via Docling
-Indipendentemente dall'`OCR_BACKEND` scelto per la KB (mineru/mineru-cloud/glmocr non li
-supportano), questi formati sono sempre instradati a Docling:
-
-- **Office (OOXML)**: `.docx`/`.dotx`/`.docm`/`.dotm`, `.pptx`/`.potx`/`.ppsx`/`.pptm`/`.potm`/`.ppsm`,
-  `.xlsx`/`.xlsm`. Conversione diretta della struttura nativa (testo, tabelle, layout slide) — nessun OCR,
-  non ci sono bitmap da scansionare.
-- **Audio/video**: `.wav`, `.mp3`, `.m4a`, `.aac`, `.ogg`, `.flac`, `.mp4`, `.avi`, `.mov`. Trascrizione
-  via la pipeline ASR di Docling con **Whisper MLX** (`WHISPER_TURBO_MLX`, nativo Apple Silicon — nessuna
-  dipendenza da `openai-whisper`/CPU). Lingua presa dal primo codice in `DOCLING_LANG`. Per i container
-  video viene estratta solo la traccia audio. Richiede `ffmpeg` sul PATH (`brew install ffmpeg`).
-
-**OpenDocument non supportato** — `.odt`/`.ods`/`.odp` (e varianti `.ott`/`.ots`/`.otp`/`.fodt`/`.fods`/`.fodp`)
-non hanno un backend Docling. `ragcli ingest` li rileva e stampa l'avviso con il comando di conversione
-da eseguire (LibreOffice headless), invece di saltarli in silenzio:
-```
-soffice --headless --convert-to docx "documento.odt"
+ragcli add <name> <source_dir> [--port]
+ragcli list
+ragcli ingest <name> [--force]
+ragcli exclude add <name> <pattern>
+ragcli exclude rm <name> <pattern>
+ragcli start <name>
+ragcli stop <name>
+ragcli remove <name>
+ragcli mcp add <name> --client <client|all>
+ragcli mcp rm <name> --client <client|all>
+ragcli move <name>
 ```
 
-Installazione modello Whisper MLX (nel venv condiviso): `uv pip install --python /Users/luca/.venv/bin/python mlx-whisper`
-(il modello viene poi scaricato automaticamente al primo utilizzo).
+Esempio rapido:
 
-## Provider e modelli
+```bash
+ragcli add progetto ~/code/mio-progetto
+ragcli start progetto
+ragcli ingest progetto
+ragcli mcp add progetto --client codex
+```
 
-**Ollama (default)** — tutto locale, impostato in `config/global.env`:
-- LLM: `gemma4:e2b` (`LLM_MODEL`)
-- Embedding: `nomic-embed-text-v2-moe` dim 768 (`EMBEDDING_MODEL` / `EMBEDDING_DIM`)
+WebUI: `http://127.0.0.1:<porta>`
 
-**OpenRouter** — cloud, richiede API key in `OPENROUTER_API_KEY`:
-- LLM: `openrouter/owl-alpha` (`OPENROUTER_LLM_MODEL`)
-- Embedding: `nvidia/llama-nemotron-embed-vl-1b-v2:free` dim 2048 (`OPENROUTER_EMBEDDING_MODEL` / `OPENROUTER_EMBEDDING_DIM`)
+`ragcli remove <name>`:
 
-Per usare OpenRouter: imposta `OPENROUTER_API_KEY` in `global.env`, poi `ragcli kb new <nome> <cartella> --provider openrouter`.
-Per cambiare provider di una KB esistente: modifica `provider:` in `config/registry.yaml` e fai `ragcli kb regen <nome>`.
+- richiede server fermo
+- rimuove la KB dal registry
+- elimina `data_dir` completa, quindi `.lightrag/`, `derived/`, `rag_storage/`, `.env`, log e cache
+- prova anche a de-registrare l'MCP dai client supportati
+- preserva integralmente `source_dir` e i file originali
 
-## Riferimento completo — `config/global.env`
-Tutte le variabili lette da `ragcli` per generare l'`.env` di ogni KB (`write_kb_env` in `bin/ragcli.py`)
-e per l'OCR in `bin/ingest.py`. Dopo una modifica: `ragcli kb regen <nome|all>`.
+## Ingest
 
-| Variabile | Default | Cosa controlla |
-|---|---|---|
-| `LLM_PROVIDER` | `ollama` | provider di default per nuove KB (`ollama` \| `openrouter`), override per-KB con `--provider` |
-| `OLLAMA_HOST` | `http://localhost:11434` | endpoint Ollama locale |
-| `LLM_MODEL` | `gemma4:e2b` | modello LLM Ollama per estrazione entità/relazioni, override per-KB con `--llm-model` |
-| `OLLAMA_LLM_NUM_CTX` | `32768` | context window del LLM Ollama |
-| `EMBEDDING_MODEL` | `nomic-embed-text-v2-moe:latest` | modello embedding Ollama |
-| `EMBEDDING_DIM` | `768` | dimensione vettori embedding (deve corrispondere al modello) |
-| `OLLAMA_EMBEDDING_NUM_CTX` | `8192` | context window dell'embedder Ollama |
-| `EMBEDDING_USE_BASE64` | `true` (ollama) / `false` (openrouter) | encoding embedding richiesto da LightRAG |
-| `OPENROUTER_API_KEY` | — | API key OpenRouter (richiesta se `--provider openrouter`) |
-| `OPENROUTER_HOST` | `https://openrouter.ai/api/v1` | endpoint OpenRouter (OpenAI-compatible) |
-| `OPENROUTER_LLM_MODEL` | `openrouter/owl-alpha` | modello LLM via OpenRouter |
-| `OPENROUTER_EMBEDDING_MODEL` | `nvidia/llama-nemotron-embed-vl-1b-v2:free` | modello embedding via OpenRouter |
-| `OPENROUTER_EMBEDDING_DIM` | `2048` | dimensione vettori embedding OpenRouter |
-| `OCR_BACKEND` | `docling` | backend OCR di default (`mineru`\|`mineru-cloud`\|`glmocr`\|`docling`), override per-KB con `--ocr` |
-| `MINERU_API` | `http://127.0.0.1:8000` | endpoint mineru-api locale |
-| `MINERU_TIMEOUT` | `3600` | timeout richiesta mineru locale (secondi) |
-| `MINERU_CLOUD_API_KEY` | — | token API mineru.net (per backend `mineru-cloud`) |
-| `GLMOCR_CONFIG` | `~/.claude/skills/glm-ocr/config.yaml` | config della skill glm-ocr |
-| `GLMOCR_PYTHON` | `/Users/luca/.venv/bin/python` | python del venv con `glmocr` installato |
-| `DOCLING_PYTHON` | `/Users/luca/.venv/bin/python` | python del venv con `docling`+`easyocr` installati |
-| `DOCLING_LANG` | `it,en` | lingue OCR EasyOCR per Docling, comma-separated |
-| `DOCLING_TIMEOUT` | `3600` | timeout sottoprocesso Docling (secondi) |
-| `RERANK_BINDING` | `null` | rerank (disabilitato, vedi Note) |
-| `SUMMARY_LANGUAGE` | `Italian` | lingua del knowledge graph generato da LightRAG, override per-KB con `--lang` |
-| `MAX_GLEANING` | `2` | passaggi extra di estrazione entità/relazioni (più alto = grafo più completo, più LLM in ingest) |
-| `CHUNK_SIZE` | `1200` | dimensione chunk per l'indicizzazione |
-| `CHUNK_OVERLAP_SIZE` | `150` | sovrapposizione tra chunk consecutivi (continuità di contesto) |
-| `COSINE_THRESHOLD` | `0.25` | soglia similarità coseno nel retrieval (più alta = meno rumore, default LightRAG 0.2) |
-| `BASE_PORT` | `9621` | porta di partenza per nuove KB (incrementata automaticamente, override con `--port`) |
+`ragcli ingest <name>`:
 
-## Note
-- Rerank disabilitato: LightRAG supporta rerank solo via cohere/jina/aliyun, non via Ollama.
-- L'ingest richiede il server della KB attivo (`ragcli ingest run` lo avvia da solo se serve).
-- Dopo `ingest`, l'estrazione del grafo gira in background sul server; segui l'avanzamento nella WebUI.
+- legge i file da `source_dir`
+- per testo/codice usa il contenuto originale
+- per PDF e immagini usa Docling con profilo high-quality per macOS
+- per Office, ODF, EPUB, EML, MSG usa il parsing nativo Docling
+- per audio/video usa Docling ASR con `WHISPER_TURBO_MLX`
+- salva i derivati in `derived/...`
+- inserisce i contenuti nel server via API
+- mantiene sync incrementale con manifest e prune dei file rimossi
+
+`ragcli ingest <name> --force`:
+
+- rigenera i derivati
+- ricostruisce manifest e cache locali
+- riallinea forzatamente il KB con la sorgente
+
+## Docling su macOS
+
+Il profilo usato nel repo è allineato alla documentazione ufficiale Docling:
+
+- `OcrMacOptions(recognition="accurate")`
+- `force_full_page_ocr=True` solo quando il probe del testo nativo risulta degradato, oppure per le immagini
+- `do_table_structure=True`
+- `TableFormerMode.ACCURATE`
+- `do_cell_matching=True`
+- `images_scale=2.0`
+- `do_formula_enrichment=True`
+- `do_code_enrichment=True`
+- `AcceleratorDevice.MPS`
+- ASR `WHISPER_TURBO_MLX` su Apple Silicon
+
+Riferimenti ufficiali:
+
+- [Installation](https://docling-project.github.io/docling/getting_started/installation/)
+- [Advanced options](https://docling-project.github.io/docling/usage/advanced_options/)
+- [Supported formats](https://docling-project.github.io/docling/usage/supported_formats/)
+- [Processing audio and video](https://docling-project.github.io/docling/usage/processing_audio_media/)
+- [GPU support](https://docling-project.github.io/docling/usage/gpu/)
+
+Nota: la docs aggiornata indica che ODF (`.odt`, `.ods`, `.odp`) è supportato da Docling, quindi non viene più trattato come formato da convertire a priori.
+
+## MCP
+
+`mcp/lightrag_mcp.py` espone solo 3 tool:
+
+- `ask`
+- `retrieve_context`
+- `find_documents`
+
+Se il server è fermo, l’MCP non prova ad avviarlo e restituisce un messaggio esplicito che rimanda a `ragcli start <name>`.
+
+## Config globale
+
+`config/global.env` controlla il runtime condiviso e i parametri globali di LightRAG/Docling.
+
+Variabili principali:
+
+- `ENGINE_PYTHON`
+- `LIGHTRAG_SERVER_BIN`
+- `DOCLING_PYTHON`
+- `DOCLING_LANG`
+- `DOCLING_TIMEOUT`
+- `LLM_PROVIDER`
+- `OLLAMA_HOST`
+- `LLM_MODEL`
+- `EMBEDDING_MODEL`
+- `BASE_PORT`

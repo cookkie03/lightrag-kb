@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wrapper per ragcli.py che usa il venv isolato della toolchain.
+# Wrapper per ragcli.py che usa il runtime condiviso del progetto.
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do
   DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
@@ -7,4 +7,8 @@ while [ -L "$SOURCE" ]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 HERE="$(cd "$(dirname "$SOURCE")" && pwd)"
-exec "$HERE/../.venv-mcp/bin/python" "$HERE/ragcli.py" "$@"
+ENGINE_PY="$HERE/../.venv-engine/bin/python"
+if [ -x "$ENGINE_PY" ]; then
+  exec "$ENGINE_PY" "$HERE/ragcli.py" "$@"
+fi
+exec python3 "$HERE/ragcli.py" "$@"

@@ -1,760 +1,570 @@
 #!/usr/bin/env python3
-"""ingest.py — OCR incrementale + inserimento in LightRAG per una KB.
-
-Per ogni file della cartella sorgente:
-  - testo/codice/dati  -> inserito direttamente
-  - pdf/immagini       -> OCR via:
-      - mineru-cloud  : API cloud mineru.net (veloce, richiede quota)
-      - mineru        : mineru-api locale su :8000
-      - glmocr        : glm-ocr via Ollama (tutto locale)
-      - docling       : Docling (IBM), tutto locale, settato a massima qualità
-    Con fallback automatico: se cloud fallisce → locale; se locale fallisce → errore.
-  - office (docx/pptx/xlsx e varianti)
-                       -> sempre via Docling (unico backend che li supporta),
-                          indipendentemente dal backend OCR configurato per la KB.
-  - audio/video        -> sempre via Docling ASR (Whisper MLX, nativo Apple Silicon),
-                          indipendentemente dal backend OCR configurato per la KB.
-  - OpenDocument (odt/ods/odp e varianti)
-                       -> non supportati da Docling: segnalati con istruzioni di
-                          conversione, mai saltati silenziosamente.
-Inserimento via API REST del lightrag-server (POST /documents/text).
-Cache incrementale su hash SHA-256: ri-OCR solo dei file cambiati.
-"""
 from __future__ import annotations
 
 import argparse
 import fnmatch
 import hashlib
-import io
 import json
+import os
 import shutil
 import subprocess
 import sys
 import time
-import zipfile
 from pathlib import Path
+from typing import Iterator
 
 import requests
-import yaml
 
-HOME = Path(__file__).resolve().parent.parent
-CONFIG = HOME / "config" / "global.env"
-REGISTRY = HOME / "config" / "registry.yaml"
-KB_DIR = HOME / "kb"
-
-
-def kb_data_dir(kb: dict) -> Path:
-    """Dir dei dati della KB: registry `data_dir` se presente, altrimenti kb/<nome>/.
-    Tenuta in sync con la stessa funzione in ragcli.py."""
-    d = kb.get("data_dir")
-    if d:
-        return Path(d).expanduser()
-    return KB_DIR / kb["name"]
+from kb_registry import ensure_kb_dirs, find_kb, global_env, load_registry
 
 TEXT_EXT = {
-    # markup / doc
-    ".md", ".markdown", ".txt", ".rst", ".org", ".tex",
-    # code
+    ".md", ".markdown", ".txt", ".rst", ".org", ".tex", ".adoc", ".asciidoc",
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".c", ".cpp", ".h", ".hpp",
     ".cs", ".go", ".rs", ".rb", ".php", ".swift", ".kt", ".scala", ".r",
     ".sh", ".zsh", ".bash", ".fish", ".ps1", ".bat",
-    # data / config
-    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini",
-    ".cfg", ".conf", ".env", ".xml", ".html", ".htm", ".sql",
-    # misc text
-    ".log", ".diff", ".patch", ".rtf",
+    ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".xml", ".html", ".htm", ".sql", ".csv", ".tsv", ".log", ".diff", ".patch", ".rtf",
 }
-OCR_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
-
-# Office (OOXML): nessun backend OCR li supporta tranne Docling -> sempre forzato,
-# qualunque sia l'OCR_BACKEND configurato per la KB. Conversione diretta, senza OCR
-# (Docling legge i formati nativamente: niente bitmap da scansionare).
+PDF_EXT = {".pdf"}
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".gif"}
 OFFICE_EXT = {
-    ".docx", ".dotx", ".docm", ".dotm",   # Word
-    ".pptx", ".potx", ".ppsx", ".pptm", ".potm", ".ppsm",   # PowerPoint
-    ".xlsx", ".xlsm",   # Excel
+    ".docx", ".dotx", ".docm", ".dotm",
+    ".pptx", ".potx", ".ppsx", ".pptm", ".potm", ".ppsm",
+    ".xlsx", ".xlsm",
+    ".odt", ".ott", ".fodt", ".ods", ".ots", ".fods", ".odp", ".otp", ".fodp",
+    ".epub", ".eml", ".msg",
 }
-
-# Audio/video: sempre via Docling ASR (Whisper), qualunque sia l'OCR_BACKEND.
-# I container video sono qui solo per estrarne la traccia audio (no analisi video).
 AUDIO_VIDEO_EXT = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".mp4", ".avi", ".mov"}
+ALL_EXT = TEXT_EXT | PDF_EXT | IMAGE_EXT | OFFICE_EXT | AUDIO_VIDEO_EXT
 
-# OpenDocument: Docling non li supporta nativamente (nessun backend ODF). Non vengono
-# ingestiti: l'utente viene avvisato con l'estensione Office equivalente da produrre
-# (es. via LibreOffice headless), piuttosto che saltarli in silenzio.
-ODF_TO_OFFICE = {
-    ".odt": "docx", ".ott": "docx", ".fodt": "docx",
-    ".odp": "pptx", ".otp": "pptx", ".fodp": "pptx",
-    ".ods": "xlsx", ".ots": "xlsx", ".fods": "xlsx",
+LOCALE_MAP = {
+    "it": "it-IT",
+    "en": "en-US",
+    "fr": "fr-FR",
+    "de": "de-DE",
+    "es": "es-ES",
+    "pt": "pt-PT",
+    "nl": "nl-NL",
 }
-
-ALL_EXT = TEXT_EXT | OCR_EXT | OFFICE_EXT | AUDIO_VIDEO_EXT
-
-MINERU_CLOUD_BASE = "https://mineru.net/api/v4"
-
-
-# ---------------------------------------------------------------- helpers
-
-def load_env(path: Path) -> dict:
-    env = {}
-    for line in path.read_text().splitlines() if path.exists() else []:
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            env[k.strip()] = v.strip()
-    return env
-
-
-def file_hash(p: Path) -> str:
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-# ---------------------------------------------------------------- OCR: mineru cloud
-
-def ocr_mineru_cloud(path: Path, g: dict) -> str:
-    """3-step flow: presigned URL → PUT su OSS → batch task → poll → markdown."""
-    token = g.get("MINERU_CLOUD_API_KEY", "")
-    if not token:
-        raise RuntimeError("MINERU_CLOUD_API_KEY non configurata")
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    size = path.stat().st_size
-
-    # step 1: ottieni URL pre-firmato
-    r = requests.post(
-        f"{MINERU_CLOUD_BASE}/file-urls/batch",
-        headers=headers,
-        json={"files": [{"name": path.name, "size": size}]},
-        timeout=30,
-    )
-    r.raise_for_status()
-    d = r.json()
-    if d.get("code") != 0:
-        raise RuntimeError(f"mineru cloud presign error: {d.get('msg')}")
-    batch_id = d["data"]["batch_id"]
-    upload_url = d["data"]["file_urls"][0]
-
-    # step 2: upload file su OSS (PUT senza auth header)
-    with open(path, "rb") as f:
-        put_resp = requests.put(upload_url, data=f, timeout=300)
-    put_resp.raise_for_status()
-
-    # step 3: avvia task batch
-    r = requests.post(
-        f"{MINERU_CLOUD_BASE}/extract/task/batch",
-        headers=headers,
-        json={
-            "batch_id": batch_id,
-            "enable_formula": False,
-            "language": "auto",
-            "is_ocr": True,
-            "enable_table": True,
-            "files": [{"name": path.name, "url": upload_url, "data_id": path.name}],
-        },
-        timeout=30,
-    )
-    r.raise_for_status()
-    d = r.json()
-    if d.get("code") != 0:
-        raise RuntimeError(f"mineru cloud task error: {d.get('msg')}")
-    result_batch_id = d["data"]["batch_id"]
-
-    # step 4: poll fino a completamento (max 30 min)
-    print(f"    ☁ mineru cloud: batch {result_batch_id[:8]}… in attesa", end="", flush=True)
-    for _ in range(180):
-        time.sleep(10)
-        r = requests.get(
-            f"{MINERU_CLOUD_BASE}/extract/task/batch",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"batch_id": result_batch_id},
-            timeout=30,
-        )
-        r.raise_for_status()
-        d = r.json()
-        if d.get("code") != 0:
-            raise RuntimeError(f"mineru cloud poll error: {d.get('msg')}")
-        tasks = d["data"].get("list", [])
-        if not tasks:
-            print(".", end="", flush=True)
-            continue
-        task = tasks[0]
-        state = task.get("state", "")
-        if state == "done":
-            print(" ✓")
-            # step 5: scarica il risultato zip
-            zip_url = task.get("full_zip_url") or task.get("zip_url")
-            if not zip_url:
-                raise RuntimeError("mineru cloud: nessun zip_url nel risultato")
-            zr = requests.get(zip_url, timeout=120)
-            zr.raise_for_status()
-            with zipfile.ZipFile(io.BytesIO(zr.content)) as zf:
-                md_files = [n for n in zf.namelist() if n.endswith(".md")]
-                if not md_files:
-                    raise RuntimeError("mineru cloud: nessun .md nello zip")
-                return zf.read(md_files[0]).decode("utf-8", errors="replace")
-        elif state in ("failed", "error"):
-            raise RuntimeError(f"mineru cloud task fallito: {task.get('err_msg','?')}")
-        print(".", end="", flush=True)
-    raise RuntimeError("mineru cloud: timeout dopo 30 minuti")
-
-
-# ---------------------------------------------------------------- OCR: mineru locale
-
-def ocr_mineru_local(path: Path, g: dict, retries: int = 2) -> str:
-    url = g.get("MINERU_API", "http://127.0.0.1:8000").rstrip("/") + "/file_parse"
-    timeout = int(g.get("MINERU_TIMEOUT", "3600"))
-    last_exc = None
-    for attempt in range(1, retries + 2):
-        try:
-            with open(path, "rb") as f:
-                resp = requests.post(
-                    url,
-                    files={"files": (path.name, f)},
-                    data={"backend": "pipeline", "return_md": "true",
-                          "return_content_list": "false", "return_images": "false"},
-                    timeout=timeout,
-                )
-            resp.raise_for_status()
-            results = resp.json().get("results", {})
-            if not results:
-                raise RuntimeError(f"mineru locale: nessun risultato per {path.name}")
-            doc = next(iter(results.values()))
-            return doc.get("md_content", "")
-        except Exception as e:
-            last_exc = e
-            if attempt <= retries:
-                print(f"    ⚠ tentativo {attempt} fallito ({e}), riprovo…")
-    raise last_exc
-
-
-# ---------------------------------------------------------------- OCR: glm-ocr
-
-def ocr_glmocr(path: Path, g: dict) -> str:
-    py = g.get("GLMOCR_PYTHON", "/Users/luca/.venv/bin/python")
-    cfg = g.get("GLMOCR_CONFIG")
-    code = (
-        "import sys\n"
-        "from glmocr import GlmOcr\n"
-        f"with GlmOcr(config_path={cfg!r}) as ocr:\n"
-        f"    r = ocr.parse({str(path)!r})\n"
-        "    sys.stdout.write(r.markdown_result)\n"
-    )
-    r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=1800)
-    if r.returncode != 0:
-        raise RuntimeError(f"glm-ocr fallito su {path.name}: {r.stderr[-500:]}")
-    return r.stdout
-
-
-# ---------------------------------------------------------------- OCR: docling
-
-_LOCALE_MAP = {
-    "it": "it-IT", "en": "en-US", "fr": "fr-FR", "de": "de-DE", "es": "es-ES",
-    "pt": "pt-PT", "nl": "nl-NL",
-}
-
-
-# Range Unicode tipici dei font PDF senza ToUnicode CMap: i caratteri vengono
-# rimappati dal renderer su glyph "decorativi" invece delle lettere vere
-# (visto su tesi LaTeX/Word con subset font). Soglia empirica: oltre il 15% di
-# caratteri alfabetici in questi range = testo nativo corrotto, non recuperabile
-# senza OCR completo della pagina (force_full_page_ocr).
-_GARBLED_RANGES = (
-    (0x2700, 0x27BF),  # Dingbats
-    (0x2580, 0x259F),  # Block Elements (capita su simboli di riempimento glifo)
-    (0xE000, 0xF8FF),  # Private Use Area
-    (0x1F0A0, 0x1F0FF),  # Playing Cards (altro uso comune come "font simbolico")
+GARBLED_RANGES = (
+    (0x2700, 0x27BF),
+    (0x2580, 0x259F),
+    (0xE000, 0xF8FF),
+    (0x1F0A0, 0x1F0FF),
 )
 
 
-def _looks_garbled(text: str, threshold: float = 0.15) -> bool:
-    """True se la quota di caratteri da font simbolico/PUA (che sostituiscono
-    le lettere vere in un PDF con cmap rotta, no ToUnicode) supera la soglia
-    rispetto alle lettere reali: indica testo nativo illeggibile, da re-OCR'are
-    a piena pagina invece di fidarsi com'è.
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    Nota: questi caratteri NON sono riconosciuti come alfabetici da
-    str.isalpha() (sono dingbat/PUA), quindi vanno contati a parte e non
-    semplicemente esclusi da un filtro su isalpha()."""
-    real_letters = sum(1 for c in text if c.isalpha())
-    garbled = sum(
-        1 for c in text if any(lo <= ord(c) <= hi for lo, hi in _GARBLED_RANGES)
-    )
+
+def _looks_garbled(text: str, threshold: float = 0.15) -> bool:
+    real_letters = sum(1 for char in text if char.isalpha())
+    garbled = sum(1 for char in text if any(lo <= ord(char) <= hi for lo, hi in GARBLED_RANGES))
     total = real_letters + garbled
     if total < 50:
         return False
     return (garbled / total) > threshold
 
 
+def _run_docling(py: str, code: str, timeout: int, label: str) -> str:
+    result = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
+    if result.returncode != 0:
+        raise RuntimeError(f"{label} fallito: {result.stderr[-500:]}")
+    return result.stdout
+
+
+def _is_mps_unsupported(error: Exception) -> bool:
+    text = str(error)
+    return "AcceleratorDeviceNotAvailableError" in text and "MPS is not supported" in text
+
+
+def _log(prefix: str, rel: str, detail: str | None = None) -> None:
+    if detail:
+        print(f"{prefix} {rel} — {detail}")
+    else:
+        print(f"{prefix} {rel}")
+
+
 def _docling_probe_text(path: Path, py: str, timeout: int) -> str:
-    """Estrazione rapida del testo nativo (no OCR) per il pre-check di qualità:
-    niente table structure / enrichment, solo per stimare se la cmap è rotta."""
     code = (
         "import sys\n"
+        "from pathlib import Path as _P\n"
         "from docling.datamodel.base_models import InputFormat\n"
         "from docling.datamodel.pipeline_options import PdfPipelineOptions\n"
         "from docling.document_converter import DocumentConverter, PdfFormatOption\n"
-        "\n"
         "opts = PdfPipelineOptions()\n"
         "opts.do_ocr = False\n"
         "opts.do_table_structure = False\n"
-        "\n"
-        "converter = DocumentConverter(\n"
-        "    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}\n"
-        ")\n"
-        "from pathlib import Path as _P\n"
+        "converter = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})\n"
         f"doc = converter.convert(_P({str(path)!r}), page_range=(1, 5)).document\n"
         "sys.stdout.write(doc.export_to_markdown())\n"
     )
-    r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        return ""  # probe fallito: si procede comunque con l'OCR normale
-    return r.stdout
+    try:
+        return _run_docling(py, code, timeout, f"probe Docling su {path.name}")
+    except Exception:
+        return ""
 
 
-def ocr_docling(path: Path, g: dict) -> str:
-    """Esegue Docling in un sottoprocesso (venv ML dedicato), settato a massima
-    qualità: table structure in modalità ACCURATE, risoluzione immagine
-    raddoppiata, formula/code enrichment abilitati. OCR applicato solo dove
-    serve (pagine bitmap/scansionate), non forzato sul testo nativo — a meno
-    che un pre-check sulle prime pagine riveli una cmap rotta (vedi
-    _looks_garbled), nel qual caso si forza l'OCR a piena pagina su tutto il
-    documento.
-
-    OCR engine: ocrmac (Vision framework nativo Apple, via Neural Engine) invece
-    di EasyOCR — su M4 misurato ~3x più rapido a parità (o leggero miglioramento)
-    di qualità del testo riconosciuto, senza costo aggiuntivo di RAM/VRAM.
-    Accelerator espliciti su MPS per i modelli torch (layout, table structure).
-    Vedi https://docling-project.github.io/docling/ per i riferimenti.
-    """
-    py = g.get("DOCLING_PYTHON", "/Users/luca/.venv/bin/python")
-    langs = [l.strip() for l in g.get("DOCLING_LANG", "it,en").split(",") if l.strip()]
-    locales = [_LOCALE_MAP.get(l, l) for l in langs]
-    timeout = int(g.get("DOCLING_TIMEOUT", "3600"))
-
-    probe = _docling_probe_text(path, py, min(timeout, 120))
-    force_full_page = _looks_garbled(probe)
-
-    code = (
-        "import sys\n"
-        "from docling.datamodel.base_models import InputFormat\n"
-        "from docling.datamodel.pipeline_options import (\n"
-        "    AcceleratorDevice, AcceleratorOptions, OcrMacOptions, PdfPipelineOptions,\n"
-        "    TableFormerMode, TableStructureOptions,\n"
-        ")\n"
-        "from docling.document_converter import DocumentConverter, PdfFormatOption\n"
-        "\n"
-        "opts = PdfPipelineOptions()\n"
-        "opts.do_ocr = True\n"
-        "opts.do_table_structure = True\n"
-        "opts.table_structure_options = TableStructureOptions(\n"
-        "    do_cell_matching=True, mode=TableFormerMode.ACCURATE,\n"
-        ")\n"
-        "opts.ocr_options = OcrMacOptions(\n"
-        f"    lang={locales!r}, recognition='accurate', force_full_page_ocr={force_full_page!r},\n"
-        ")\n"
-        "opts.images_scale = 2.0\n"
-        "opts.do_formula_enrichment = True\n"
-        "opts.do_code_enrichment = True\n"
-        "opts.accelerator_options = AcceleratorOptions(\n"
-        "    device=AcceleratorDevice.MPS, num_threads=8,\n"
-        ")\n"
-        "\n"
-        "converter = DocumentConverter(\n"
-        "    format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}\n"
-        ")\n"
-        # Path esplicito, non stringa: convert() instrada le str come stream
-        # risolto (perde la directory, mantiene solo il basename) e la pipeline
-        # ASR la risolverebbe poi contro la cwd invece che contro il file reale.
-        "from pathlib import Path as _P\n"
-        f"doc = converter.convert(_P({str(path)!r})).document\n"
-        "sys.stdout.write(doc.export_to_markdown())\n"
+def render_docling_visual(path: Path, env: dict[str, str]) -> str:
+    py = env["DOCLING_PYTHON"]
+    langs = [item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()]
+    locales = [LOCALE_MAP.get(item, item) for item in langs]
+    timeout = int(env.get("DOCLING_TIMEOUT", "3600"))
+    force_full_page = path.suffix.lower() in IMAGE_EXT or _looks_garbled(
+        _docling_probe_text(path, py, min(timeout, 120))
     )
-    r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        raise RuntimeError(f"docling fallito su {path.name}: {r.stderr[-500:]}")
-    return r.stdout
+    def _code(accelerator_device: str) -> str:
+        return (
+            "import sys\n"
+            "from pathlib import Path as _P\n"
+            "from docling.datamodel.base_models import InputFormat\n"
+            "from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions\n"
+            "from docling.datamodel.pipeline_options import OcrMacOptions, PdfPipelineOptions, TableFormerMode, TableStructureOptions\n"
+            "from docling.document_converter import DocumentConverter, PdfFormatOption\n"
+            "opts = PdfPipelineOptions()\n"
+            "opts.do_ocr = True\n"
+            "opts.do_table_structure = True\n"
+            "opts.table_structure_options = TableStructureOptions(do_cell_matching=True, mode=TableFormerMode.ACCURATE)\n"
+            f"opts.ocr_options = OcrMacOptions(lang={locales!r}, recognition='accurate', force_full_page_ocr={force_full_page!r})\n"
+            "opts.images_scale = 2.0\n"
+            "opts.do_formula_enrichment = True\n"
+            "opts.do_code_enrichment = True\n"
+            f"opts.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.{accelerator_device}, num_threads=8)\n"
+            "format_options = {InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}\n"
+            "if hasattr(InputFormat, 'IMAGE'):\n"
+            "    try:\n"
+            "        from docling.document_converter import ImageFormatOption\n"
+            "        format_options[InputFormat.IMAGE] = ImageFormatOption(pipeline_options=opts)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "converter = DocumentConverter(format_options=format_options)\n"
+            f"doc = converter.convert(_P({str(path)!r})).document\n"
+            "sys.stdout.write(doc.export_to_markdown())\n"
+        )
+
+    try:
+        return _run_docling(py, _code("MPS"), timeout, f"Docling visual su {path.name}")
+    except Exception as exc:
+        if not _is_mps_unsupported(exc):
+            raise
+        print(f"    ⚠ Docling su {path.name}: MPS non supportato da questo modello, fallback a CPU")
+        return _run_docling(py, _code("CPU"), timeout, f"Docling visual (CPU fallback) su {path.name}")
 
 
-# ---------------------------------------------------------------- Docling: office
-
-def ocr_docling_office(path: Path, g: dict) -> str:
-    """Office (docx/pptx/xlsx e varianti) via Docling: conversione diretta della
-    struttura nativa del documento (testo, tabelle, layout slide), senza OCR —
-    non ci sono bitmap da scansionare. Unico backend che li supporta: forzato a
-    prescindere dall'OCR_BACKEND configurato per la KB."""
-    py = g.get("DOCLING_PYTHON", "/Users/luca/.venv/bin/python")
-    timeout = int(g.get("DOCLING_TIMEOUT", "3600"))
+def render_docling_native(path: Path, env: dict[str, str]) -> str:
+    py = env["DOCLING_PYTHON"]
+    timeout = int(env.get("DOCLING_TIMEOUT", "3600"))
     code = (
         "import sys\n"
-        "from docling.document_converter import DocumentConverter\n"
         "from pathlib import Path as _P\n"
+        "from docling.document_converter import DocumentConverter\n"
         f"doc = DocumentConverter().convert(_P({str(path)!r})).document\n"
         "sys.stdout.write(doc.export_to_markdown())\n"
     )
-    r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        raise RuntimeError(f"docling (office) fallito su {path.name}: {r.stderr[-500:]}")
-    return r.stdout
+    return _run_docling(py, code, timeout, f"Docling native su {path.name}")
 
 
-# ---------------------------------------------------------------- Docling: audio/video (ASR)
-
-def ocr_docling_audio(path: Path, g: dict) -> str:
-    """Audio/video via la pipeline ASR di Docling: trascrizione con Whisper in
-    variante MLX (nativa Apple Silicon, nessuna dipendenza da openai-whisper),
-    forzata esplicitamente — niente fallback silenzioso su whisper nativo se
-    mlx-whisper non fosse installato, per evitare di girare su CPU senza saperlo.
-    Richiede ffmpeg sul PATH (demuxing audio, anche dai container video).
-    Lingua presa dal primo codice in DOCLING_LANG (stesso campo usato per l'OCR)."""
+def render_docling_audio(path: Path, env: dict[str, str]) -> str:
     if shutil.which("ffmpeg") is None:
-        raise RuntimeError(
-            "ffmpeg non trovato sul PATH: richiesto per l'OCR audio/video. "
-            "Installa con 'brew install ffmpeg'."
-        )
-    py = g.get("DOCLING_PYTHON", "/Users/luca/.venv/bin/python")
-    lang = next((l.strip() for l in g.get("DOCLING_LANG", "it,en").split(",") if l.strip()), "en")
-    timeout = int(g.get("DOCLING_TIMEOUT", "3600"))
+        raise RuntimeError("ffmpeg non trovato sul PATH. Installa con `brew install ffmpeg`.")
+    py = env["DOCLING_PYTHON"]
+    timeout = int(env.get("DOCLING_TIMEOUT", "3600"))
+    language = next((item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()), "en")
     code = (
         "import sys\n"
-        "from docling.datamodel.asr_model_specs import WHISPER_TURBO_MLX\n"
+        "from pathlib import Path as _P\n"
+        "from docling.datamodel import asr_model_specs\n"
         "from docling.datamodel.base_models import InputFormat\n"
         "from docling.datamodel.pipeline_options import AsrPipelineOptions\n"
         "from docling.document_converter import AudioFormatOption, DocumentConverter\n"
         "from docling.pipeline.asr_pipeline import AsrPipeline\n"
-        "\n"
-        f"asr_options = WHISPER_TURBO_MLX.model_copy(update={{'language': {lang!r}}})\n"
-        "opts = AsrPipelineOptions(asr_options=asr_options)\n"
-        "converter = DocumentConverter(format_options={\n"
-        "    InputFormat.AUDIO: AudioFormatOption(pipeline_cls=AsrPipeline, pipeline_options=opts)\n"
-        "})\n"
-        # Path esplicito, non stringa: convert() instrada le str come stream
-        # risolto (perde la directory, mantiene solo il basename) e la pipeline
-        # ASR la risolverebbe poi contro la cwd invece che contro il file reale.
-        "from pathlib import Path as _P\n"
+        f"asr_options = asr_model_specs.WHISPER_TURBO_MLX.model_copy(update={{'language': {language!r}}})\n"
+        "pipeline_options = AsrPipelineOptions(asr_options=asr_options)\n"
+        "format_options = {InputFormat.AUDIO: AudioFormatOption(pipeline_cls=AsrPipeline, pipeline_options=pipeline_options)}\n"
+        "if hasattr(InputFormat, 'VIDEO'):\n"
+        "    try:\n"
+        "        from docling.document_converter import VideoFormatOption\n"
+        "        format_options[InputFormat.VIDEO] = VideoFormatOption(pipeline_cls=AsrPipeline, pipeline_options=pipeline_options)\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "converter = DocumentConverter(format_options=format_options)\n"
         f"doc = converter.convert(_P({str(path)!r})).document\n"
         "sys.stdout.write(doc.export_to_markdown())\n"
     )
-    r = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
-    if r.returncode != 0:
-        raise RuntimeError(f"docling (audio/video ASR) fallito su {path.name}: {r.stderr[-500:]}")
-    return r.stdout
+    return _run_docling(py, code, timeout, f"Docling audio/video su {path.name}")
 
 
-# ---------------------------------------------------------------- OCR dispatcher con fallback
-
-def ocr(path: Path, backend: str, g: dict) -> str:
-    """Esegue OCR con fallback automatico cloud→locale in caso di errore."""
-    if backend == "mineru-cloud":
-        try:
-            return ocr_mineru_cloud(path, g)
-        except Exception as e:
-            print(f"\n    ⚠ mineru cloud fallito ({e}), fallback su mineru locale…")
-            return ocr_mineru_local(path, g)
-    elif backend == "glmocr":
-        return ocr_glmocr(path, g)
-    elif backend == "docling":
-        return ocr_docling(path, g)
-    else:  # "mineru" (locale, default)
-        return ocr_mineru_local(path, g)
+def _document_rows(data: object) -> list[dict]:
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        for key in ("documents", "items", "data", "rows", "results"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+    return []
 
 
-# ---------------------------------------------------------------- LightRAG insert
-
-def insert_text(port: int, text: str, source: str, retries: int = 8) -> str:
-    """POST /documents/text. Ritorna 'ok' | 'exists' | 'empty'.
-
-    LightRAG usa lo stesso 409 per DUE casi diversi e vanno distinti:
-      - "Document storage already contains ..." -> il documento è GIÀ nella KB:
-        non è un errore, si salta (rende l'ingest ri-eseguibile/idempotente).
-      - pipeline occupata (scan/destructive in corso) -> si aspetta con backoff
-        esponenziale (10s..5min, ~20 min totali)."""
-    if not text.strip():
-        return "empty"
-    for attempt in range(1, retries + 2):
-        resp = requests.post(
-            f"http://127.0.0.1:{port}/documents/text",
-            json={"text": text, "file_source": source},
-            timeout=300,
-        )
-        if resp.status_code == 409:
-            try:
-                detail = resp.json().get("detail", "")
-            except Exception:
-                detail = resp.text or ""
-            if "already contains" in detail or "already exists" in detail:
-                return "exists"  # già presente: niente retry, si salta
-            if attempt <= retries:  # occupata davvero: aspetta e riprova
-                wait = min(10 * 2 ** (attempt - 1), 300)
-                print(f"    ⏳ pipeline occupata (409), riprovo in {wait}s ({attempt}/{retries})…")
-                time.sleep(wait)
-                continue
-        resp.raise_for_status()
-        return "ok"
-    raise RuntimeError("pipeline occupata: troppi 409 consecutivi")
-
-
-# ---------------------------------------------------------------- mirror: stato KB
-
-def fetch_kb_docs(port: int) -> dict | None:
-    """Mappa file_path -> [doc_id] dei documenti attualmente nel KB.
-
-    Interroga GET /documents (che ritorna {"statuses": {<stato>: [doc, ...]}}) e
-    appiattisce tutti i bucket di stato. Ritorna None se la GET fallisce: in quel
-    caso il chiamante degrada a sola-aggiunta (niente mirror, niente prune) per
-    non rischiare cancellazioni su informazioni incomplete."""
-    try:
-        r = requests.get(f"http://127.0.0.1:{port}/documents", timeout=60)
-        r.raise_for_status()
-        statuses = r.json().get("statuses", {})
-    except Exception as e:
-        print(f"  ⚠ impossibile leggere i documenti del KB ({e}): mirror disattivato per questo run.")
-        return None
+def fetch_kb_docs(port: int, page_size: int = 50) -> dict[str, list[str]] | None:
     docs: dict[str, list[str]] = {}
-    for bucket in statuses.values():
-        for d in bucket or []:
-            fp, did = d.get("file_path"), d.get("id")
-            if fp and did:
-                docs.setdefault(fp, []).append(did)
-    return docs
+    try:
+        page = 1
+        saw_any_page = False
+        while True:
+            response = requests.post(
+                f"http://127.0.0.1:{port}/documents/paginated",
+                json={
+                    "status_filter": None,
+                    "page": page,
+                    "page_size": page_size,
+                    "sort_field": "updated_at",
+                    "sort_direction": "desc",
+                },
+                timeout=60,
+            )
+            if response.status_code == 404:
+                raise RuntimeError("endpoint paginato non disponibile")
+            response.raise_for_status()
+            rows = _document_rows(response.json())
+            if not rows:
+                if saw_any_page:
+                    break
+                raise RuntimeError("risposta paginata vuota")
+            saw_any_page = True
+            for item in rows:
+                file_path = item.get("file_path")
+                doc_id = item.get("id")
+                if file_path and doc_id:
+                    docs.setdefault(file_path, []).append(doc_id)
+            if len(rows) < page_size:
+                break
+            page += 1
+        return docs
+    except Exception:
+        try:
+            response = requests.get(f"http://127.0.0.1:{port}/documents", timeout=60)
+            response.raise_for_status()
+        except Exception as exc:
+            print(f"  ⚠ impossibile leggere i documenti del KB ({exc}): mirror disattivato per questo run.")
+            return None
+        statuses = response.json().get("statuses", {})
+        for bucket in statuses.values():
+            for item in bucket or []:
+                file_path = item.get("file_path")
+                doc_id = item.get("id")
+                if file_path and doc_id:
+                    docs.setdefault(file_path, []).append(doc_id)
+        return docs
 
 
 def delete_docs(port: int, doc_ids: list[str]) -> bool:
-    """Cancella documenti dal KB per doc_id (DELETE /documents/delete_document).
-    delete_file resta False: non si toccano MAI i file sorgente. Ritorna True se ok."""
     if not doc_ids:
         return True
     try:
-        r = requests.delete(
+        response = requests.delete(
             f"http://127.0.0.1:{port}/documents/delete_document",
             json={"doc_ids": doc_ids, "delete_file": False, "delete_llm_cache": True},
             timeout=120,
         )
-        r.raise_for_status()
+        response.raise_for_status()
         return True
-    except Exception as e:
-        print(f"    ⚠ cancellazione doc fallita ({e}); proseguo.")
+    except Exception as exc:
+        print(f"    ⚠ cancellazione doc fallita ({exc}); proseguo.")
         return False
 
 
-# ---------------------------------------------------------------- main
+def insert_text(port: int, text: str, source: str, retries: int = 8) -> str:
+    if not text.strip():
+        return "empty"
+    for attempt in range(1, retries + 2):
+        response = requests.post(
+            f"http://127.0.0.1:{port}/documents/text",
+            json={"text": text, "file_source": source},
+            timeout=300,
+        )
+        if response.status_code == 409:
+            try:
+                detail = response.json().get("detail", "")
+            except Exception:
+                detail = response.text or ""
+            if "already contains" in detail or "already exists" in detail:
+                return "exists"
+            wait = min(10 * 2 ** (attempt - 1), 300)
+            if attempt <= retries:
+                print(f"    ⏳ pipeline occupata (409), riprovo in {wait}s ({attempt}/{retries})…")
+                time.sleep(wait)
+                continue
+        response.raise_for_status()
+        return "ok"
+    raise RuntimeError("pipeline occupata: troppi 409 consecutivi")
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="OCR incrementale + sync a specchio della KB col filesystem sorgente.")
-    ap.add_argument("--kb", required=True)
-    ap.add_argument("--force", action="store_true",
-                    help="ignora la cache: ri-OCR e reinserisce tutti i file")
-    ap.add_argument("--add", action="store_true",
-                    help="solo-aggiunta: NON elimina nulla dal KB (niente prune degli orfani "
-                         "né rimozione delle versioni vecchie dei file modificati)")
-    args = ap.parse_args()
 
-    g = load_env(CONFIG)
-    reg = yaml.safe_load(REGISTRY.read_text()) or {"kbs": []}
-    kb = next((k for k in reg["kbs"] if k["name"] == args.kb), None)
-    if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
+def load_manifest(path: Path) -> dict[str, dict]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    src = Path(kb["source_folder"])
-    port = kb["port"]
-    backend = kb.get("ocr_backend", g.get("OCR_BACKEND", "docling"))
-    kdir = kb_data_dir(kb)
-    inputs = kdir / "inputs"
-    inputs.mkdir(parents=True, exist_ok=True)
-    cache_path = kdir / ".ocr_cache.json"
-    cache = {} if args.force or not cache_path.exists() else json.loads(cache_path.read_text())
 
-    # Guardia: sorgente inesistente/non montata -> stop, nessun danno al KB.
-    if not src.is_dir():
-        sys.exit(f"⚠ Cartella sorgente non disponibile: {src}\n"
-                 f"  (non montata? cloud offline?) Nessuna modifica al KB.")
+def save_manifest(path: Path, manifest: dict[str, dict]) -> None:
+    path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
 
-    # Escludi la data_dir della KB dalla scansione: se è dentro la sorgente
-    # (es. <src>/.lightrag) rglob la attraverserebbe e re-indicizzerebbe i propri
-    # output OCR (il filtro su p.name salta solo i dotfile, non le dot-cartelle).
-    kdir_res = kdir.resolve()
 
-    def _under_kdir(p: Path) -> bool:
+def category_for(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in PDF_EXT:
+        return "pdf"
+    if ext in IMAGE_EXT:
+        return "images"
+    if ext in OFFICE_EXT:
+        return "office"
+    if ext in AUDIO_VIDEO_EXT:
+        return "audio"
+    return "text"
+
+
+def artifact_path(derived_dir: Path, category: str, rel: Path) -> Path:
+    return derived_dir / category / rel.parent / f"{rel.name}.md"
+
+
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def iter_candidates(source_dir: Path, data_dir: Path, exclude_patterns: list[str]) -> Iterator[Path]:
+    data_root = data_dir.resolve()
+
+    def under_data_dir(path: Path) -> bool:
         try:
-            p.resolve().relative_to(kdir_res)
+            path.resolve().relative_to(data_root)
             return True
         except (ValueError, OSError):
             return False
 
-    # Esclusioni utente (campo `exclude` nel registry.yaml, gestito con
-    # `ragcli kb exclude add/rm/ls`): pattern fnmatch sul path relativo alla
-    # sorgente. `*` attraversa anche le sottocartelle (niente regole `**`
-    # speciali), quindi "Bozze/*" esclude un'intera cartella e "*.tmp" un'estensione.
-    exclude_patterns = kb.get("exclude", [])
+    def excluded(path: Path) -> bool:
+        rel = path.relative_to(source_dir).as_posix()
+        return any(fnmatch.fnmatch(rel, pattern) for pattern in exclude_patterns)
 
-    def _is_excluded(p: Path) -> bool:
-        rel = p.relative_to(src).as_posix()
-        return any(fnmatch.fnmatch(rel, pat) for pat in exclude_patterns)
+    seen_dirs: set[Path] = set()
+    for root, dirs, files in os.walk(source_dir, topdown=True, followlinks=True):
+        root_path = Path(root)
+        try:
+            root_resolved = root_path.resolve()
+        except OSError:
+            dirs[:] = []
+            continue
+        if root_resolved in seen_dirs:
+            dirs[:] = []
+            continue
+        seen_dirs.add(root_resolved)
 
-    candidates = [p for p in src.rglob("*")
-                  if p.is_file() and not p.name.startswith(".") and not _under_kdir(p)
-                  and not _is_excluded(p)]
-    files = [p for p in candidates if p.suffix.lower() in ALL_EXT]
-    # ODF (odt/ods/odp...): Docling non li supporta -> segnalati, non saltati in silenzio.
-    odf_files = [p for p in candidates if p.suffix.lower() in ODF_TO_OFFICE]
-    # present_rel: tutti i file gestiti CHE COMPAIONO nel listing. I placeholder
-    # cloud non scaricati compaiono comunque (is_file resta True) -> NON sono orfani.
-    present_rel = {str(p.relative_to(src)) for p in files}
+        kept_dirs = []
+        for dirname in dirs:
+            child = root_path / dirname
+            if under_data_dir(child):
+                continue
+            try:
+                child_resolved = child.resolve()
+            except OSError:
+                continue
+            if child_resolved in seen_dirs:
+                continue
+            kept_dirs.append(dirname)
+        dirs[:] = kept_dirs
 
-    if odf_files:
-        print(f"⚠ {len(odf_files)} file in formato OpenDocument (non supportato da Docling):")
-        for p in odf_files:
-            target = ODF_TO_OFFICE[p.suffix.lower()]
-            print(f"    · {p.relative_to(src)}  ->  convertilo in .{target}, es.: "
-                  f"soffice --headless --convert-to {target} \"{p}\"")
+        for filename in files:
+            path = root_path / filename
+            if under_data_dir(path):
+                continue
+            try:
+                if not path.is_file():
+                    continue
+            except OSError:
+                continue
+            if excluded(path):
+                continue
+            if path.suffix.lower() in ALL_EXT:
+                yield path
 
-    # Stato attuale del KB: serve a riconoscere modificati/orfani. None = GET fallita.
+
+def clean_force_run(derived_dir: Path) -> None:
+    for subdir in ("text", "pdf", "images", "office", "audio"):
+        target = derived_dir / subdir
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+    for subdir in ("cache", "manifests"):
+        target = derived_dir / subdir
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir(parents=True, exist_ok=True)
+
+
+def read_text_file(path: Path) -> str:
+    return path.read_text(errors="replace")
+
+
+def render_content(path: Path, env: dict[str, str]) -> tuple[str, str | None]:
+    ext = path.suffix.lower()
+    category = category_for(path)
+    if ext in TEXT_EXT:
+        return read_text_file(path), None
+    if ext in PDF_EXT or ext in IMAGE_EXT:
+        return render_docling_visual(path, env), category
+    if ext in OFFICE_EXT:
+        return render_docling_native(path, env), category
+    if ext in AUDIO_VIDEO_EXT:
+        return render_docling_audio(path, env), category
+    raise RuntimeError(f"Estensione non supportata: {path.suffix}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Sync incrementale di una KB LightRAG con sorgente reale + derived Docling."
+    )
+    parser.add_argument("--kb", required=True)
+    parser.add_argument("--force", action="store_true", help="rigenera cache, derivati e riallinea la KB")
+    args = parser.parse_args()
+
+    env = global_env()
+    registry = load_registry(env)
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+
+    ensure_kb_dirs(kb)
+    source_dir = Path(kb["source_dir"])
+    data_dir = Path(kb["data_dir"])
+    derived_dir = Path(kb["derived_dir"])
+    port = kb["port"]
+    if not source_dir.is_dir():
+        sys.exit(
+            f"⚠ Cartella sorgente non disponibile: {source_dir}\n"
+            f"  (non montata? cloud offline?) Nessuna modifica al KB."
+        )
+    try:
+        if not requests.get(f"http://127.0.0.1:{port}/health", timeout=3).ok:
+            raise RuntimeError("health check fallito")
+    except Exception:
+        sys.exit(
+            f"Server '{args.kb}' non attivo o non healthy. "
+            f"Esegui `ragcli stop {args.kb}`, poi `ragcli start {args.kb}`, quindi riprova."
+        )
+
+    if args.force:
+        clean_force_run(derived_dir)
+    manifest_path = derived_dir / "manifests" / "sync.json"
+    manifest = {} if args.force else load_manifest(manifest_path)
+
     kb_docs = fetch_kb_docs(port)
-    mirror = kb_docs is not None and not args.add
+    mirror = kb_docs is not None
+    exclude_patterns = kb.get("exclude", [])
+    candidate_count = sum(1 for _ in iter_candidates(source_dir, data_dir, exclude_patterns))
+    present_rel: set[str] = set()
 
-    total = len(files)
-    added = updated = unchanged = 0
-    removed = 0
-    pending: list[str] = []   # senza riscontro nel KB (vuoti/non disponibili) -> da ritentare
-    failed: list[str] = []    # errori veri (OCR/insert)
-    mode_lbl = ("" if mirror else "  [sola-aggiunta]" if args.add
-                else "  [mirror off: KB non leggibile]")
-    print(f"KB '{args.kb}': {total} file in {src} (OCR backend: {backend}){mode_lbl}")
+    added = updated = unchanged = removed = failed_count = 0
+    next_manifest: dict[str, dict] = {}
 
-    def save_cache():
-        cache_path.write_text(json.dumps(cache, indent=2))
-
-    for p in files:
-        ext = p.suffix.lower()
-        rel = str(p.relative_to(src))
-        try:
-            h = file_hash(p)
-        except FileNotFoundError:
-            print(f"  ⚠ file sparito (non sincronizzato?), salto: {rel}")
-            pending.append(rel)
-            cache.pop(rel, None)
-            continue
-        except (TimeoutError, OSError) as e:
-            print(f"  ⚠ file non disponibile localmente (OneDrive/cloud non scaricato?), salto: {rel} ({e})")
-            pending.append(rel)
-            continue
-
-        in_kb = kb_docs is not None and rel in kb_docs
-        # INVARIATO: la cache concorda E (se conosciamo lo stato del KB) è davvero
-        # nel KB. Se la cache dice "fatto" ma nel KB non c'è, NON saltiamo: reinseriamo.
-        if not args.force and cache.get(rel) == h and (kb_docs is None or in_kb):
+    print(f"KB '{args.kb}': {candidate_count} file candidati dalla sorgente {source_dir}")
+    for path in iter_candidates(source_dir, data_dir, exclude_patterns):
+        rel = path.relative_to(source_dir).as_posix()
+        present_rel.add(rel)
+        old_entry = manifest.get(rel, {})
+        current_hash = file_hash(path)
+        in_kb = bool(kb_docs and rel in kb_docs)
+        if not args.force and old_entry.get("sha256") == current_hash and in_kb:
+            next_manifest[rel] = old_entry
             unchanged += 1
+            _log("· invariato", rel)
             continue
 
-        # MODIFICATO: esisteva una versione diversa (già nel KB, o hash cache diverso).
-        is_modified = in_kb or (rel in cache and cache.get(rel) != h)
-        # Rimuovi la versione precedente dal KB prima di reinserire (salvo --add).
-        if in_kb and not args.add:
-            if delete_docs(port, kb_docs.get(rel, [])):
-                print(f"  ↻ aggiorno '{rel}': rimossa versione precedente dal KB")
+        action = "updated" if old_entry else "added"
+        if in_kb and kb_docs:
+            _log("↻ rimuovo vecchia versione", rel)
+            delete_docs(port, kb_docs.get(rel, []))
 
         try:
-            safe = rel.replace("/", "__")
-            out = inputs / f"{safe}.{h[:12]}.md"   # cache OCR content-addressed
-            # Compat con la vecchia cache OCR (<safe>.md senza hash): se la cache
-            # conferma che il contenuto è invariato (cache[rel]==h), migrala al nome
-            # content-addressed invece di ri-OCR. Va fatto PRIMA del cleanup, che
-            # altrimenti la cancellerebbe.
-            legacy = inputs / f"{safe}.md"
-            if not out.exists() and legacy.exists() and cache.get(rel) == h:
-                try:
-                    legacy.replace(out)
-                except OSError:
-                    pass
-            # cleanup: rimuovi vecchi output OCR di questo file con hash diverso
-            prefix = safe + "."
-            for old in inputs.iterdir():
-                if old.name.startswith(prefix) and old.name.endswith(".md") and old != out:
-                    try:
-                        old.unlink()
-                    except OSError:
-                        pass
-            if ext in TEXT_EXT:
-                md = p.read_text(errors="replace")
-            elif out.exists():
-                print(f"  [cache] OCR da inputs/ per {rel}")
-                md = out.read_text(errors="replace")
-            elif ext in OFFICE_EXT:
-                # Forzato a Docling: unico backend che legge i formati Office nativi.
-                print(f"  Docling(office) {rel}")
-                md = ocr_docling_office(p, g)
-                if md.strip():
-                    out.write_text(md)
-            elif ext in AUDIO_VIDEO_EXT:
-                # Forzato a Docling ASR: unico backend con trascrizione audio/video.
-                print(f"  Docling(ASR) {rel}")
-                md = ocr_docling_audio(p, g)
-                if md.strip():
-                    out.write_text(md)
+            category = category_for(path)
+            if category == "text":
+                _log("→ testo", rel)
+            elif category == "pdf":
+                _log("→ Docling PDF", rel)
+            elif category == "images":
+                _log("→ Docling immagine", rel)
+            elif category == "office":
+                _log("→ Docling documento", rel)
+            elif category == "audio":
+                _log("→ Docling audio/video", rel)
+            content, artifact_category = render_content(path, env)
+            artifact_rel: str | None = None
+            if artifact_category is not None:
+                out_path = artifact_path(derived_dir, artifact_category, path.relative_to(source_dir))
+                ensure_parent(out_path)
+                out_path.write_text(content)
+                artifact_rel = out_path.relative_to(data_dir).as_posix()
+                _log("  salvato derivato", rel, artifact_rel)
+            old_artifact_rel = old_entry.get("artifact_rel")
+            if old_artifact_rel and old_artifact_rel != artifact_rel:
+                old_artifact = data_dir / old_artifact_rel
+                if old_artifact.exists():
+                    old_artifact.unlink()
+                    _log("  rimosso derivato vecchio", rel, old_artifact_rel)
+            result = insert_text(port, content, rel)
+            if result == "empty":
+                _log("· salto", rel, "contenuto vuoto")
+                continue
+            if action == "added":
+                added += 1
+                _log("✓ inserito", rel)
             else:
-                label = {"mineru-cloud": "☁ cloud", "glmocr": "glm", "mineru": "locale", "docling": "docling"}
-                print(f"  OCR({label.get(backend, backend)}) {rel}")
-                md = ocr(p, backend, g)
-                if md.strip():
-                    out.write_text(md)   # salva solo OCR non vuoti (evita re-OCR stantio)
+                updated += 1
+                _log("✓ aggiornato", rel)
+            next_manifest[rel] = {
+                "sha256": current_hash,
+                "category": category,
+                "artifact_rel": artifact_rel,
+                "source_key": rel,
+            }
+        except Exception as exc:
+            failed_count += 1
+            print(f"✗ errore su '{rel}': {exc}")
 
-            res = insert_text(port, md, rel)
-            if res == "empty":
-                # Nessun contenuto nel KB: NON cachiamo, resta pending -> ritentato.
-                pending.append(rel)
-                cache.pop(rel, None)
-                print(f"    ⚠ vuoto, salto (verrà ritentato al prossimo ingest)")
-            elif res == "exists":
-                cache[rel] = h
-                save_cache()
-                unchanged += 1
-                print(f"    ↩ già nella KB")
-            else:  # ok
-                cache[rel] = h
-                save_cache()
-                if is_modified:
-                    updated += 1
-                    print(f"    ✓ aggiornato ({len(md)} char)")
-                else:
-                    added += 1
-                    print(f"    ✓ inserito ({len(md)} char)")
-        except Exception as e:
-            failed.append(rel)
-            print(f"    ✗ errore: {e}")
+    if mirror and kb_docs is not None:
+        orphans = {rel: ids for rel, ids in kb_docs.items() if rel not in present_rel}
+        for rel, ids in orphans.items():
+            _log("− rimuovo orfano", rel)
+            if delete_docs(port, ids):
+                removed += 1
+            entry = manifest.get(rel)
+            if entry and entry.get("artifact_rel"):
+                artifact = data_dir / entry["artifact_rel"]
+                if artifact.exists():
+                    artifact.unlink()
+                    _log("  eliminato derivato orfano", rel, entry["artifact_rel"])
 
-    # ---- PRUNE: rimuovi dal KB i documenti i cui file sono spariti dalla sorgente.
-    if mirror:
-        orphans = {fp: ids for fp, ids in kb_docs.items() if fp not in present_rel}
-        if orphans:
-            if not present_rel:
-                # GUARDIA anti-wipe: sorgente vuota/non montata ma KB pieno -> niente prune.
-                print(f"\n⚠ GUARDIA: nessun file leggibile nella sorgente ma il KB contiene "
-                      f"{len(kb_docs)} documenti. Sorgente non montata/cloud offline? "
-                      f"PRUNE ANNULLATO (nessuna cancellazione).")
-            else:
-                print(f"\nRimuovo {len(orphans)} documenti orfani dal KB (file spariti dalla sorgente):")
-                for fp, ids in orphans.items():
-                    if delete_docs(port, ids):
-                        removed += 1
-                        cache.pop(fp, None)
-                        print(f"  - {fp}")
-                save_cache()
+    for rel, entry in manifest.items():
+        if rel in next_manifest:
+            continue
+        artifact_rel = entry.get("artifact_rel")
+        if artifact_rel:
+            artifact = data_dir / artifact_rel
+            if artifact.exists():
+                artifact.unlink()
 
-    print(f"\nFatto: {added} nuovi, {updated} aggiornati, {unchanged} invariati, {removed} rimossi.")
-    if pending:
-        print(f"⏳ {len(pending)} senza riscontro nel KB (vuoti/non disponibili) — verranno ritentati:")
-        for r in pending:
-            print(f"    · {r}")
-    if failed:
-        print(f"✗ {len(failed)} falliti:")
-        for r in failed:
-            print(f"    · {r}")
-    print(f"L'embedding/estrazione gira in background sul server. "
-          f"Stato: http://127.0.0.1:{port} (WebUI)")
-    sys.exit(1 if failed else 0)
+    save_manifest(manifest_path, next_manifest)
+    print(
+        f"\nFatto: {added} nuovi, {updated} aggiornati, {unchanged} invariati, "
+        f"{removed} rimossi, {failed_count} falliti."
+    )
+    sys.exit(1 if failed_count else 0)
 
 
 if __name__ == "__main__":
