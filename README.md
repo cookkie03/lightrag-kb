@@ -95,14 +95,17 @@ WebUI: `http://127.0.0.1:<porta>`
 
 `ragcli ingest <name>`:
 
-- legge i file da `source_dir`
+- sincronizza prima la `.env` locale della KB con la configurazione globale
+- scopre i candidati dalla `source_dir`
+- esegue render e insert come fasi separate
 - per testo/codice usa il contenuto originale
 - per PDF e immagini usa Docling con profilo high-quality per macOS
 - per Office, ODF, EPUB, EML, MSG usa il parsing nativo Docling
 - per audio/video usa Docling ASR con `WHISPER_TURBO_MLX`
 - salva i derivati in `derived/...`
-- inserisce i contenuti nel server via API
-- mantiene sync incrementale con manifest e prune dei file rimossi
+- usa un manifest phase-aware per saltare rerender inutili e ritentare solo gli insert mancati
+- prova gli insert in un ordine più stabile: testo, office, PDF/immagini, audio/video
+- mantiene sync incrementale con prune dei file rimossi
 
 `ragcli ingest <name> --force`:
 

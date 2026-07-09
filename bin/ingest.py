@@ -62,6 +62,10 @@ def file_hash(path: Path) -> str:
     return digest.hexdigest()
 
 
+def text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _looks_garbled(text: str, threshold: float = 0.15) -> bool:
     real_letters = sum(1 for char in text if char.isalpha())
     garbled = sum(1 for char in text if any(lo <= ord(char) <= hi for lo, hi in GARBLED_RANGES))
@@ -88,6 +92,92 @@ def _log(prefix: str, rel: str, detail: str | None = None) -> None:
         print(f"{prefix} {rel} — {detail}")
     else:
         print(f"{prefix} {rel}")
+
+
+def _manifest_entry(rel: str, path: Path, current_hash: str, category: str, old_entry: dict | None) -> dict:
+    entry = {
+        "source_key": old_entry.get("source_key") if old_entry else rel,
+        "sha256": current_hash,
+        "category": category,
+        "artifact_rel": old_entry.get("artifact_rel") if old_entry else None,
+        "render_status": "pending",
+        "rendered_sha256": None,
+        "insert_status": "pending",
+        "last_error": None,
+    }
+    if old_entry:
+        entry["render_status"] = old_entry.get("render_status") or ("done" if category == "text" or old_entry.get("artifact_rel") else "pending")
+        entry["rendered_sha256"] = old_entry.get("rendered_sha256") or (old_entry.get("sha256") if entry["render_status"] == "done" else None)
+        entry["insert_status"] = old_entry.get("insert_status") or ("done" if old_entry.get("sha256") == current_hash and entry["render_status"] == "done" else "pending")
+        entry["last_error"] = old_entry.get("last_error")
+    if entry["source_key"] != rel:
+        entry["source_key"] = rel
+    if entry["category"] != category:
+        entry["category"] = category
+    if path.suffix.lower() in TEXT_EXT and not entry["artifact_rel"]:
+        entry["artifact_rel"] = None
+    return entry
+
+
+def _complete_insert_status(status: str | None) -> bool:
+    return status == "done"
+
+
+def _needs_render(entry: dict, source_changed: bool, force: bool, artifact_exists: bool) -> bool:
+    if force or source_changed:
+        return True
+    if entry.get("render_status") != "done":
+        return True
+    if entry.get("category") != "text" and not artifact_exists:
+        return True
+    return False
+
+
+def _needs_insert(entry: dict, source_changed: bool, force: bool, mirror_has_doc: bool | None) -> bool:
+    if force or source_changed:
+        return True
+    if not _complete_insert_status(entry.get("insert_status")):
+        return True
+    if mirror_has_doc is False:
+        return True
+    return False
+
+
+def _insert_priority(category: str) -> tuple[int, str]:
+    return {
+        "text": (0, category),
+        "office": (1, category),
+        "pdf": (2, category),
+        "images": (2, category),
+        "audio": (3, category),
+    }.get(category, (4, category))
+
+
+def _insert_content(item: dict, data_dir: Path) -> str:
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    category = item["category"]
+    if category == "text":
+        return read_text_file(item["path"])
+    artifact_rel = item["entry"].get("artifact_rel")
+    if not artifact_rel:
+        raise RuntimeError("manca artifact_rel per il contenuto derivato")
+    artifact = data_dir / artifact_rel
+    if not artifact.exists():
+        raise RuntimeError(f"artifatto derivato mancante: {artifact_rel}")
+    return artifact.read_text(errors="replace")
+
+
+def _classify_insert_failure(exc: Exception) -> str:
+    text = str(exc).lower()
+    if "pipeline occupata" in text or "409" in text or "timed out" in text or "timeout" in text or "connection" in text:
+        return "transient"
+    return "failed"
+
+
+def _phase_header(name: str, count: int) -> None:
+    print(f"\n[{name}] {count} file")
 
 
 def _docling_probe_text(path: Path, py: str, timeout: int) -> str:
@@ -296,7 +386,7 @@ def insert_text(port: int, text: str, source: str, retries: int = 8) -> str:
                 return "exists"
             wait = min(10 * 2 ** (attempt - 1), 300)
             if attempt <= retries:
-                print(f"    ⏳ pipeline occupata (409), riprovo in {wait}s ({attempt}/{retries})…")
+                print(f"    ⏳ pipeline occupata (409) su {source}, riprovo in {wait}s ({attempt}/{retries})…")
                 time.sleep(wait)
                 continue
         response.raise_for_status()
@@ -426,6 +516,194 @@ def render_content(path: Path, env: dict[str, str]) -> tuple[str, str | None]:
     raise RuntimeError(f"Estensione non supportata: {path.suffix}")
 
 
+def _render_phase(
+    plan: list[dict],
+    env: dict[str, str],
+    source_dir: Path,
+    data_dir: Path,
+    derived_dir: Path,
+    manifest: dict[str, dict],
+) -> int:
+    render_failed = 0
+    render_queue = [item for item in plan if item["needs_render"]]
+    if not render_queue:
+        return 0
+    _phase_header("render", len(render_queue))
+    for item in render_queue:
+        rel = item["rel"]
+        path = item["path"]
+        entry = item["entry"]
+        category = item["category"]
+        if item["source_changed"] or item["force"]:
+            entry["insert_status"] = "pending"
+            entry["last_error"] = None
+        try:
+            if category == "text":
+                _log("→ testo", rel)
+            elif category == "pdf":
+                _log("→ Docling PDF", rel)
+            elif category == "images":
+                _log("→ Docling immagine", rel)
+            elif category == "office":
+                _log("→ Docling documento", rel)
+            elif category == "audio":
+                _log("→ Docling audio/video", rel)
+            content, artifact_category = render_content(path, env)
+            entry["rendered_sha256"] = text_hash(content)
+            item["content"] = content
+            item["rendered_sha256"] = entry["rendered_sha256"]
+            artifact_rel = entry.get("artifact_rel")
+            if artifact_category is not None:
+                out_path = artifact_path(derived_dir, artifact_category, path.relative_to(source_dir))
+                ensure_parent(out_path)
+                out_path.write_text(content)
+                artifact_rel = out_path.relative_to(data_dir).as_posix()
+                _log("  salvato derivato", rel, artifact_rel)
+                old_artifact_rel = entry.get("artifact_rel")
+                if old_artifact_rel and old_artifact_rel != artifact_rel:
+                    old_artifact = data_dir / old_artifact_rel
+                    if old_artifact.exists():
+                        old_artifact.unlink()
+                        _log("  rimosso derivato vecchio", rel, old_artifact_rel)
+            elif category == "text":
+                artifact_rel = None
+            entry.update(
+                {
+                    "sha256": item["current_hash"],
+                    "category": category,
+                    "artifact_rel": artifact_rel,
+                    "render_status": "done",
+                    "last_error": None,
+                }
+            )
+            _log("✓ render", rel)
+        except Exception as exc:
+            render_failed += 1
+            entry.update(
+                {
+                    "sha256": item["current_hash"],
+                    "category": category,
+                    "render_status": "failed",
+                    "last_error": str(exc),
+                }
+            )
+            print(f"✗ render fallito '{rel}': {exc}")
+    save_manifest(derived_dir / "manifests" / "sync.json", manifest)
+    return render_failed
+
+
+def _insert_phase(
+    plan: list[dict],
+    port: int,
+    data_dir: Path,
+    kb_docs: dict[str, list[str]] | None,
+    derived_dir: Path,
+    manifest: dict[str, dict],
+) -> tuple[int, int, list[dict]]:
+    inserted_added = 0
+    inserted_updated = 0
+    transient: list[dict] = []
+    insert_queue = [item for item in plan if item["needs_insert"] and item["entry"].get("render_status") == "done"]
+    if not insert_queue:
+        return inserted_added, inserted_updated, transient
+    insert_queue.sort(key=lambda item: (_insert_priority(item["category"]), item["rel"]))
+    _phase_header("insert", len(insert_queue))
+    for item in insert_queue:
+        rel = item["rel"]
+        entry = item["entry"]
+        source_changed = item["source_changed"]
+        try:
+            if (source_changed or item["force"]) and kb_docs is not None and rel in kb_docs:
+                _log("↻ rimuovo vecchia versione", rel)
+                delete_docs(port, kb_docs.get(rel, []))
+            content = _insert_content(item, data_dir)
+            result = insert_text(port, content, rel)
+            if result == "empty":
+                entry["insert_status"] = "done"
+                entry["last_error"] = None
+                _log("· salto", rel, "contenuto vuoto")
+                if item["is_new"]:
+                    inserted_added += 1
+                else:
+                    inserted_updated += 1
+            elif result == "exists":
+                entry["insert_status"] = "done"
+                entry["last_error"] = None
+                _log("· già presente", rel)
+                if item["is_new"]:
+                    inserted_added += 1
+                else:
+                    inserted_updated += 1
+            else:
+                entry["insert_status"] = "done"
+                entry["last_error"] = None
+                if item["is_new"]:
+                    inserted_added += 1
+                    _log("✓ inserito", rel)
+                else:
+                    inserted_updated += 1
+                    _log("✓ aggiornato", rel)
+        except Exception as exc:
+            status = _classify_insert_failure(exc)
+            entry["insert_status"] = status
+            entry["last_error"] = str(exc)
+            if status == "transient":
+                transient.append(item)
+                print(f"↻ insert in attesa '{rel}': {exc}")
+            else:
+                print(f"✗ insert fallito '{rel}': {exc}")
+    save_manifest(derived_dir / "manifests" / "sync.json", manifest)
+    return inserted_added, inserted_updated, transient
+
+
+def _retry_transient_inserts(
+    transient: list[dict],
+    port: int,
+    data_dir: Path,
+    kb_docs: dict[str, list[str]] | None,
+    derived_dir: Path,
+    manifest: dict[str, dict],
+) -> tuple[int, int]:
+    if not transient:
+        return 0, 0
+    print("\n[insert:retry] passaggio finale sui transient")
+    time.sleep(5)
+    added = updated = 0
+    retry_queue = sorted(transient, key=lambda item: (_insert_priority(item["category"]), item["rel"]))
+    for item in retry_queue:
+        rel = item["rel"]
+        entry = item["entry"]
+        try:
+            if (item["source_changed"] or item["force"]) and kb_docs is not None and rel in kb_docs:
+                _log("↻ rimuovo vecchia versione", rel)
+                delete_docs(port, kb_docs.get(rel, []))
+            content = _insert_content(item, data_dir)
+            result = insert_text(port, content, rel)
+            if result in {"empty", "exists"}:
+                entry["insert_status"] = "done"
+                entry["last_error"] = None
+                _log("· pronto", rel, "già stabile")
+                if item["is_new"]:
+                    added += 1
+                else:
+                    updated += 1
+            else:
+                entry["insert_status"] = "done"
+                entry["last_error"] = None
+                if item["is_new"]:
+                    added += 1
+                    _log("✓ inserito", rel)
+                else:
+                    updated += 1
+                    _log("✓ aggiornato", rel)
+        except Exception as exc:
+            entry["insert_status"] = "failed"
+            entry["last_error"] = str(exc)
+            print(f"✗ retry fallito '{rel}': {exc}")
+    save_manifest(derived_dir / "manifests" / "sync.json", manifest)
+    return added, updated
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Sync incrementale di una KB LightRAG con sorgente reale + derived Docling."
@@ -465,80 +743,80 @@ def main() -> None:
     manifest = {} if args.force else load_manifest(manifest_path)
 
     kb_docs = fetch_kb_docs(port)
-    mirror = kb_docs is not None
     exclude_patterns = kb.get("exclude", [])
-    candidate_count = sum(1 for _ in iter_candidates(source_dir, data_dir, exclude_patterns))
+    candidates = sorted(
+        list(iter_candidates(source_dir, data_dir, exclude_patterns)),
+        key=lambda path: path.relative_to(source_dir).as_posix(),
+    )
     present_rel: set[str] = set()
 
-    added = updated = unchanged = removed = failed_count = 0
+    added = updated = unchanged = removed = 0
+    render_failed = insert_failed = 0
     next_manifest: dict[str, dict] = {}
+    plan: list[dict] = []
 
-    print(f"KB '{args.kb}': {candidate_count} file candidati dalla sorgente {source_dir}")
-    for path in iter_candidates(source_dir, data_dir, exclude_patterns):
+    print(f"KB '{args.kb}': {len(candidates)} file candidati dalla sorgente {source_dir}")
+    for path in candidates:
         rel = path.relative_to(source_dir).as_posix()
         present_rel.add(rel)
         old_entry = manifest.get(rel, {})
         current_hash = file_hash(path)
-        in_kb = bool(kb_docs and rel in kb_docs)
-        if not args.force and old_entry.get("sha256") == current_hash and in_kb:
-            next_manifest[rel] = old_entry
+        category = category_for(path)
+        entry = _manifest_entry(rel, path, current_hash, category, old_entry if not args.force else None)
+        source_changed = bool(
+            args.force
+            or old_entry.get("sha256") != current_hash
+            or old_entry.get("category") != category
+        )
+        artifact_rel = entry.get("artifact_rel")
+        artifact_exists = bool(artifact_rel) and (data_dir / artifact_rel).exists()
+        mirror_has_doc = None if kb_docs is None else rel in kb_docs
+        render_needed = _needs_render(entry, source_changed, args.force, artifact_exists)
+        insert_needed = _needs_insert(entry, source_changed, args.force, mirror_has_doc)
+        if (
+            not args.force
+            and not source_changed
+            and _complete_insert_status(entry.get("insert_status"))
+            and entry.get("render_status") == "done"
+            and (category == "text" or artifact_exists)
+            and mirror_has_doc is not False
+        ):
+            next_manifest[rel] = entry
             unchanged += 1
             _log("· invariato", rel)
             continue
 
-        action = "updated" if old_entry else "added"
-        if in_kb and kb_docs:
-            _log("↻ rimuovo vecchia versione", rel)
-            delete_docs(port, kb_docs.get(rel, []))
-
-        try:
-            category = category_for(path)
-            if category == "text":
-                _log("→ testo", rel)
-            elif category == "pdf":
-                _log("→ Docling PDF", rel)
-            elif category == "images":
-                _log("→ Docling immagine", rel)
-            elif category == "office":
-                _log("→ Docling documento", rel)
-            elif category == "audio":
-                _log("→ Docling audio/video", rel)
-            content, artifact_category = render_content(path, env)
-            artifact_rel: str | None = None
-            if artifact_category is not None:
-                out_path = artifact_path(derived_dir, artifact_category, path.relative_to(source_dir))
-                ensure_parent(out_path)
-                out_path.write_text(content)
-                artifact_rel = out_path.relative_to(data_dir).as_posix()
-                _log("  salvato derivato", rel, artifact_rel)
-            old_artifact_rel = old_entry.get("artifact_rel")
-            if old_artifact_rel and old_artifact_rel != artifact_rel:
-                old_artifact = data_dir / old_artifact_rel
-                if old_artifact.exists():
-                    old_artifact.unlink()
-                    _log("  rimosso derivato vecchio", rel, old_artifact_rel)
-            result = insert_text(port, content, rel)
-            if result == "empty":
-                _log("· salto", rel, "contenuto vuoto")
-                continue
-            if action == "added":
-                added += 1
-                _log("✓ inserito", rel)
-            else:
-                updated += 1
-                _log("✓ aggiornato", rel)
-            next_manifest[rel] = {
-                "sha256": current_hash,
+        if render_needed:
+            _log("↻ render", rel, category)
+        elif insert_needed:
+            _log("↻ insert", rel, category)
+        next_manifest[rel] = entry
+        plan.append(
+            {
+                "path": path,
+                "rel": rel,
+                "current_hash": current_hash,
                 "category": category,
-                "artifact_rel": artifact_rel,
-                "source_key": rel,
+                "entry": entry,
+                "source_changed": source_changed,
+                "needs_render": render_needed,
+                "needs_insert": insert_needed,
+                "is_new": not bool(old_entry),
+                "force": args.force,
             }
-        except Exception as exc:
-            failed_count += 1
-            print(f"✗ errore su '{rel}': {exc}")
+        )
 
-    if mirror and kb_docs is not None:
+    render_failed = _render_phase(plan, env, source_dir, data_dir, derived_dir, next_manifest)
+    inserted_added, inserted_updated, transient = _insert_phase(plan, port, data_dir, kb_docs, derived_dir, next_manifest)
+    retry_added, retry_updated = _retry_transient_inserts(transient, port, data_dir, kb_docs, derived_dir, next_manifest)
+    added += inserted_added + retry_added
+    updated += inserted_updated + retry_updated
+    insert_failed = sum(1 for item in plan if item["needs_insert"] and item["entry"].get("insert_status") == "failed")
+
+    if kb_docs is not None:
         orphans = {rel: ids for rel, ids in kb_docs.items() if rel not in present_rel}
+        if orphans:
+            _phase_header("prune", len(orphans))
         for rel, ids in orphans.items():
             _log("− rimuovo orfano", rel)
             if delete_docs(port, ids):
@@ -562,9 +840,9 @@ def main() -> None:
     save_manifest(manifest_path, next_manifest)
     print(
         f"\nFatto: {added} nuovi, {updated} aggiornati, {unchanged} invariati, "
-        f"{removed} rimossi, {failed_count} falliti."
+        f"{removed} rimossi, {render_failed} render falliti, {insert_failed} insert falliti."
     )
-    sys.exit(1 if failed_count else 0)
+    sys.exit(1 if (render_failed or insert_failed) else 0)
 
 
 if __name__ == "__main__":

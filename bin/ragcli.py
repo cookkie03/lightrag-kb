@@ -303,6 +303,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             f"Server '{args.name}' non healthy su :{kb['port']}. "
             f"Esegui `ragcli stop {args.name}`, poi `ragcli start {args.name}`, quindi riprova."
         )
+    write_kb_env(kb, env)
     cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name]
     if args.force:
         cmd.append("--force")
