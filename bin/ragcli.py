@@ -209,6 +209,20 @@ def cmd_exclude_rm(args: argparse.Namespace) -> None:
         sys.exit(f"Nessun pattern rimosso da '{args.name}'.")
 
 
+def cmd_exclude_ls(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.name)
+    if not kb:
+        sys.exit(f"KB '{args.name}' non trovata.")
+    patterns = kb.get("exclude", [])
+    if not patterns:
+        print(f"Nessuna esclusione definita per '{args.name}'.")
+        return
+    print(f"Esclusioni per '{args.name}':")
+    for pattern in patterns:
+        print(f"  - {pattern}")
+
+
 def _normalize_exclude_patterns(raw_patterns: list[str]) -> list[str]:
     normalized: list[str] = []
     for raw in raw_patterns:
@@ -467,6 +481,14 @@ def build_parser() -> argparse.ArgumentParser:
     ex_rm.add_argument("name")
     ex_rm.add_argument("pattern", nargs="+")
     ex_rm.set_defaults(func=cmd_exclude_rm)
+    ex_ls = exclude_sub.add_parser(
+        "ls",
+        help="elenca i pattern di esclusione della KB",
+        description=exclude_help,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ex_ls.add_argument("name")
+    ex_ls.set_defaults(func=cmd_exclude_ls)
 
     start = sub.add_parser("start", help="avvia il server di una KB")
     start.add_argument("name")
