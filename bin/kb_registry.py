@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import fnmatch
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 
 import yaml
 
@@ -152,6 +154,162 @@ def storage_mode(kb: dict) -> str:
     data_dir = Path(kb["data_dir"])
     source_dir = Path(kb["source_dir"])
     return "source" if is_relative_to(data_dir, source_dir) else "repo"
+
+
+def split_exclude_specs(raw_patterns: list[str]) -> list[str]:
+    specs: list[str] = []
+    for raw in raw_patterns:
+        for chunk in raw.replace(";", ",").split(","):
+            spec = chunk.strip()
+            if spec:
+                specs.append(spec)
+    return specs
+
+
+def canonicalize_exclude_specs(specs: list[str]) -> tuple[list[str], bool]:
+    canonical: list[str] = []
+    seen: set[str] = set()
+    changed = False
+    for spec in specs:
+        normalized = spec.strip()
+        if normalized.endswith("/*") and not normalized.endswith("/**"):
+            normalized = normalized[:-1]
+        if normalized != spec:
+            changed = True
+        if normalized in seen:
+            changed = True
+            continue
+        seen.add(normalized)
+        canonical.append(normalized)
+    return canonical, changed
+
+
+def normalize_exclude_specs_for_kb(specs: list[str], source_dir: Path) -> tuple[list[str], bool]:
+    canonical, changed = canonicalize_exclude_specs(specs)
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for spec in canonical:
+        upgraded = spec
+        if "/" not in spec and not any(char in spec for char in "*?[]"):
+            candidate = source_dir / spec
+            try:
+                if candidate.is_dir():
+                    upgraded = f"{spec}/"
+            except OSError:
+                pass
+        if upgraded != spec:
+            changed = True
+        if upgraded in seen:
+            changed = True
+            continue
+        seen.add(upgraded)
+        normalized.append(upgraded)
+    return normalized, changed
+
+
+def _source_rel_dirs(source_dir: Path, data_dir: Path) -> list[str]:
+    data_root = data_dir.resolve()
+    rel_dirs: list[str] = []
+    seen_dirs: set[Path] = set()
+    for root, dirs, _files in os.walk(source_dir, topdown=True, followlinks=True):
+        root_path = Path(root)
+        try:
+            root_resolved = root_path.resolve()
+        except OSError:
+            dirs[:] = []
+            continue
+        if root_resolved in seen_dirs:
+            dirs[:] = []
+            continue
+        seen_dirs.add(root_resolved)
+
+        kept_dirs: list[str] = []
+        for dirname in dirs:
+            child = root_path / dirname
+            try:
+                child_resolved = child.resolve()
+            except OSError:
+                continue
+            if is_relative_to(child_resolved, data_root):
+                continue
+            kept_dirs.append(dirname)
+            rel_dirs.append(child.relative_to(source_dir).as_posix())
+        dirs[:] = kept_dirs
+    rel_dirs.sort()
+    return rel_dirs
+
+
+def _folder_rule_matches(rel_dir: str, folder_spec: str) -> bool:
+    candidate = PurePosixPath(rel_dir)
+    if "/" in folder_spec:
+        target = rel_dir
+    else:
+        if len(candidate.parts) != 1:
+            return False
+        target = candidate.name
+    return fnmatch.fnmatch(target, folder_spec)
+
+
+def _ancestor_dirs(rel_path: str) -> list[str]:
+    path = PurePosixPath(rel_path)
+    parents = list(path.parents[:-1])
+    return [parent.as_posix() for parent in reversed(parents) if parent.as_posix() not in {".", ""}]
+
+
+def dir_is_excluded(rel_dir: str, specs: list[str]) -> bool:
+    canonical, _ = canonicalize_exclude_specs(specs)
+    candidates = _ancestor_dirs(rel_dir) + [rel_dir]
+    for spec in canonical:
+        if not spec.endswith("/"):
+            continue
+        folder_spec = spec[:-1]
+        if any(_folder_rule_matches(candidate, folder_spec) for candidate in candidates):
+            return True
+    return False
+
+
+def path_is_excluded(rel_path: str, specs: list[str]) -> bool:
+    canonical, _ = canonicalize_exclude_specs(specs)
+    basename = PurePosixPath(rel_path).name
+    for spec in canonical:
+        if spec.endswith("/"):
+            if any(_folder_rule_matches(candidate, spec[:-1]) for candidate in _ancestor_dirs(rel_path)):
+                return True
+            continue
+        if "/" in spec:
+            if fnmatch.fnmatch(rel_path, spec):
+                return True
+            continue
+        if fnmatch.fnmatch(basename, spec):
+            return True
+    return False
+
+
+def expand_exclude_specs(specs: list[str], source_dir: Path, data_dir: Path) -> list[str]:
+    canonical, _ = canonicalize_exclude_specs(specs)
+    expanded: list[str] = []
+    seen: set[str] = set()
+    source_dirs = _source_rel_dirs(source_dir, data_dir)
+    for spec in canonical:
+        if not spec.endswith("/"):
+            if spec not in seen:
+                seen.add(spec)
+                expanded.append(spec)
+            continue
+        folder_spec = spec[:-1]
+        matched = False
+        for rel_dir in source_dirs:
+            if _folder_rule_matches(rel_dir, folder_spec):
+                display = f"{rel_dir}/"
+                if display in seen:
+                    continue
+                seen.add(display)
+                expanded.append(display)
+                matched = True
+        if not matched and spec not in seen:
+            seen.add(spec)
+            expanded.append(spec)
+    return expanded
 
 
 def write_kb_env(kb: dict, env: dict[str, str] | None = None) -> Path:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import os
@@ -15,7 +14,15 @@ from typing import Iterator
 
 import requests
 
-from kb_registry import ensure_kb_dirs, find_kb, global_env, load_registry
+from kb_registry import (
+    dir_is_excluded,
+    ensure_kb_dirs,
+    find_kb,
+    global_env,
+    load_registry,
+    normalize_exclude_specs_for_kb,
+    path_is_excluded,
+)
 
 TEXT_EXT = {
     ".md", ".markdown", ".txt", ".rst", ".org", ".tex", ".adoc", ".asciidoc",
@@ -429,7 +436,7 @@ def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def iter_candidates(source_dir: Path, data_dir: Path, exclude_patterns: list[str]) -> Iterator[Path]:
+def iter_candidates(source_dir: Path, data_dir: Path, exclude_specs: list[str]) -> Iterator[Path]:
     data_root = data_dir.resolve()
 
     def under_data_dir(path: Path) -> bool:
@@ -438,10 +445,6 @@ def iter_candidates(source_dir: Path, data_dir: Path, exclude_patterns: list[str
             return True
         except (ValueError, OSError):
             return False
-
-    def excluded(path: Path) -> bool:
-        rel = path.relative_to(source_dir).as_posix()
-        return any(fnmatch.fnmatch(rel, pattern) for pattern in exclude_patterns)
 
     seen_dirs: set[Path] = set()
     for root, dirs, files in os.walk(source_dir, topdown=True, followlinks=True):
@@ -467,6 +470,8 @@ def iter_candidates(source_dir: Path, data_dir: Path, exclude_patterns: list[str
                 continue
             if child_resolved in seen_dirs:
                 continue
+            if dir_is_excluded(child.relative_to(source_dir).as_posix(), exclude_specs):
+                continue
             kept_dirs.append(dirname)
         dirs[:] = kept_dirs
 
@@ -479,7 +484,7 @@ def iter_candidates(source_dir: Path, data_dir: Path, exclude_patterns: list[str
                     continue
             except OSError:
                 continue
-            if excluded(path):
+            if path_is_excluded(path.relative_to(source_dir).as_posix(), exclude_specs):
                 continue
             if path.suffix.lower() in ALL_EXT:
                 yield path
@@ -743,7 +748,7 @@ def main() -> None:
     manifest = {} if args.force else load_manifest(manifest_path)
 
     kb_docs = fetch_kb_docs(port)
-    exclude_patterns = kb.get("exclude", [])
+    exclude_patterns, _ = normalize_exclude_specs_for_kb(kb.get("exclude", []), source_dir)
     candidates = sorted(
         list(iter_candidates(source_dir, data_dir, exclude_patterns)),
         key=lambda path: path.relative_to(source_dir).as_posix(),

@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import fnmatch
-import os
-import re
 import shutil
 import subprocess
 import sys
@@ -18,12 +15,16 @@ from kb_registry import (
     INGEST_SCRIPT,
     MCP_SCRIPT,
     KB_ROOT,
+    canonicalize_exclude_specs,
     ensure_kb_dirs,
+    expand_exclude_specs,
     find_kb,
     global_env,
     load_registry,
     merged_runtime_env,
+    normalize_exclude_specs_for_kb,
     next_port,
+    split_exclude_specs,
     save_registry,
     storage_mode,
     write_kb_env,
@@ -174,22 +175,21 @@ def cmd_exclude_add(args: argparse.Namespace) -> None:
     kb = find_kb(registry, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
-    source_dir = Path(kb["source_dir"])
-    data_dir = Path(kb["data_dir"])
-    patterns, _ = _ensure_materialized_excludes(kb, source_dir, data_dir)
+    _canonicalize_kb_excludes(kb)
+    patterns = kb.setdefault("exclude", [])
     added: list[str] = []
-    for pattern in _materialize_exclude_specs(args.pattern, source_dir, data_dir):
-        if pattern in patterns or pattern in added:
+    input_specs, _ = canonicalize_exclude_specs(split_exclude_specs(args.pattern))
+    for spec in input_specs:
+        if spec in patterns or spec in added:
             continue
-        patterns.append(pattern)
-        added.append(pattern)
+        patterns.append(spec)
+        added.append(spec)
+    _canonicalize_kb_excludes(kb)
     save_registry(registry)
     write_kb_env(kb)
     if added:
-        print(
-            f"✓ Esclusi da '{args.name}': "
-            f"{', '.join(_display_exclude_patterns(added, source_dir, data_dir))}"
-        )
+        display, _ = canonicalize_exclude_specs(added)
+        print(f"✓ Esclusi da '{args.name}': {', '.join(display)}")
     else:
         print(f"Nessun nuovo pattern da aggiungere per '{args.name}'.")
 
@@ -199,24 +199,21 @@ def cmd_exclude_rm(args: argparse.Namespace) -> None:
     kb = find_kb(registry, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
-    source_dir = Path(kb["source_dir"])
-    data_dir = Path(kb["data_dir"])
-    patterns, _ = _ensure_materialized_excludes(kb, source_dir, data_dir)
+    _canonicalize_kb_excludes(kb)
+    patterns = kb.get("exclude", [])
     removed: list[str] = []
-    for pattern in _materialize_exclude_specs(args.pattern, source_dir, data_dir):
-        if pattern not in patterns:
+    targets, _ = canonicalize_exclude_specs(split_exclude_specs(args.pattern))
+    for spec in targets:
+        if spec not in patterns:
             continue
-        patterns.remove(pattern)
-        removed.append(pattern)
+        patterns.remove(spec)
+        removed.append(spec)
     if not patterns:
         kb["exclude"] = []
     save_registry(registry)
     write_kb_env(kb)
     if removed:
-        print(
-            f"✓ Rimosse esclusioni da '{args.name}': "
-            f"{', '.join(_display_exclude_patterns(removed, source_dir, data_dir))}"
-        )
+        print(f"✓ Rimosse esclusioni da '{args.name}': {', '.join(removed)}")
     else:
         sys.exit(f"Nessun pattern rimosso da '{args.name}'.")
 
@@ -226,150 +223,30 @@ def cmd_exclude_ls(args: argparse.Namespace) -> None:
     kb = find_kb(registry, args.name)
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
-    source_dir = Path(kb["source_dir"])
-    data_dir = Path(kb["data_dir"])
-    patterns, changed = _ensure_materialized_excludes(kb, source_dir, data_dir)
+    changed = _canonicalize_kb_excludes(kb)
     if changed:
         save_registry(registry)
+    source_dir = Path(kb["source_dir"])
+    data_dir = Path(kb["data_dir"])
+    patterns = kb.get("exclude", [])
     if not patterns:
         print(f"Nessuna esclusione definita per '{args.name}'.")
         return
 
-    display_patterns = _display_exclude_patterns(patterns, source_dir, data_dir)
-    print(f"Esclusioni per '{args.name}':")
+    display_patterns = expand_exclude_specs(patterns, source_dir, data_dir) if args.expanded else patterns
+    title = "Esclusioni espanse" if args.expanded else "Esclusioni"
+    print(f"{title} per '{args.name}':")
     for pattern in display_patterns:
         print(f"  - {pattern}")
 
 
-def _split_exclude_specs(raw_patterns: list[str]) -> list[str]:
-    specs: list[str] = []
-    for raw in raw_patterns:
-        for token in re.split(r"[;,]", raw):
-            pattern = token.strip()
-            if not pattern:
-                continue
-            specs.append(pattern)
-    return specs
-
-
-def _source_rel_dirs(source_dir: Path, data_dir: Path) -> list[str]:
-    data_root = data_dir.resolve()
-    rel_dirs: list[str] = []
-    seen_dirs: set[Path] = set()
-    for root, dirs, _files in os.walk(source_dir, topdown=True, followlinks=True):
-        root_path = Path(root)
-        try:
-            root_resolved = root_path.resolve()
-        except OSError:
-            dirs[:] = []
-            continue
-        if root_resolved in seen_dirs:
-            dirs[:] = []
-            continue
-        seen_dirs.add(root_resolved)
-
-        kept_dirs = []
-        for dirname in dirs:
-            child = root_path / dirname
-            try:
-                child_resolved = child.resolve()
-            except OSError:
-                continue
-            try:
-                child_resolved.relative_to(data_root)
-                continue
-            except ValueError:
-                pass
-            kept_dirs.append(dirname)
-            rel_dirs.append(child.relative_to(source_dir).as_posix())
-        dirs[:] = kept_dirs
-    rel_dirs.sort()
-    return rel_dirs
-
-
-def _is_glob(pattern: str) -> bool:
-    return any(char in pattern for char in "*?[]")
-
-
-def _materialize_folder_specs(raw_pattern: str, source_dir: Path, data_dir: Path) -> list[str]:
-    folder_spec = raw_pattern[:-1]
-    if not folder_spec:
-        return []
-    if not _is_glob(folder_spec):
-        return [f"{folder_spec}/*"]
-    matches = []
-    for rel_dir in _source_rel_dirs(source_dir, data_dir):
-        if fnmatch.fnmatch(rel_dir, folder_spec):
-            matches.append(f"{rel_dir}/*")
-    return matches
-
-
-def _materialize_exclude_specs(raw_patterns: list[str], source_dir: Path, data_dir: Path) -> list[str]:
-    materialized: list[str] = []
-    for spec in _split_exclude_specs(raw_patterns):
-        if spec.endswith("/"):
-            materialized.extend(_materialize_folder_specs(spec, source_dir, data_dir))
-        else:
-            materialized.append(spec)
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for pattern in materialized:
-        if pattern in seen:
-            continue
-        seen.add(pattern)
-        deduped.append(pattern)
-    return deduped
-
-
-def _ensure_materialized_excludes(kb: dict, source_dir: Path, data_dir: Path) -> tuple[list[str], bool]:
-    current = list(kb.get("exclude", []))
-    materialized: list[str] = []
-    seen: set[str] = set()
-    changed = False
-    for pattern in current:
-        if pattern.endswith("/*") and _is_glob(pattern[:-2]):
-            expanded = _materialize_folder_specs(pattern[:-1], source_dir, data_dir)
-            if expanded != [pattern]:
-                changed = True
-            for item in expanded:
-                if item in seen:
-                    continue
-                seen.add(item)
-                materialized.append(item)
-            continue
-        if pattern not in seen:
-            seen.add(pattern)
-            materialized.append(pattern)
-    if changed or materialized != current:
-        kb["exclude"] = materialized
-        return materialized, True
-    return materialized, False
-
-
-def _display_exclude_pattern(pattern: str) -> str:
-    if pattern.endswith("/*"):
-        return f"{pattern[:-2]}/"
-    return pattern
-
-
-def _display_exclude_patterns(patterns: list[str], source_dir: Path, data_dir: Path) -> list[str]:
-    display: list[str] = []
-    seen: set[str] = set()
-    for pattern in patterns:
-        if pattern.endswith("/*") and _is_glob(pattern[:-2]):
-            for item in _materialize_folder_specs(pattern[:-1], source_dir, data_dir):
-                shown = _display_exclude_pattern(item)
-                if shown in seen:
-                    continue
-                seen.add(shown)
-                display.append(shown)
-            continue
-        shown = _display_exclude_pattern(pattern)
-        if shown in seen:
-            continue
-        seen.add(shown)
-        display.append(shown)
-    return display
+def _canonicalize_kb_excludes(kb: dict) -> bool:
+    canonical, changed = normalize_exclude_specs_for_kb(
+        kb.get("exclude", []),
+        Path(kb["source_dir"]),
+    )
+    kb["exclude"] = canonical
+    return changed
 
 
 def cmd_start(args: argparse.Namespace) -> None:
@@ -582,16 +459,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     exclude_help = (
         "Pattern glob stile fnmatch.\n"
-        "- usa / finale per indicare una cartella: 'agent/' salva la cartella 'agent' e tutto il suo contenuto\n"
+        "- usa / finale per indicare una cartella: 'agent/' prende la cartella top-level 'agent'; 'notes/agent/' prende quel path specifico\n"
         "- usa * per i file: '*.txt' prende tutti i file txt; 'agent*' prende agent.md, agentico.md, ecc.\n"
-        "- usa '.*/' per dire 'tutte le cartelle che iniziano con .' nella KB; il comando le espande e salva le cartelle concrete una per una\n"
+        "- usa '.*/' per dire 'tutte le cartelle top-level che iniziano con .' nella KB; l'espansione avviene live con 'ls --expanded' e durante ingest\n"
         "- puoi passare più pattern nella stessa istruzione, separati da spazi oppure con virgole o ';'\n"
-        "- se un pattern termina con /, viene convertito automaticamente in /*\n"
+        "- 'ls' mostra le regole salvate; 'ls --expanded' mostra l'espansione corrente delle cartelle\n"
         "- quota sempre i pattern per evitare l'espansione della shell\n"
         "Esempi:\n"
         "  ragcli exclude add second-brain '*.txt' 'agent*' 'agent/'\n"
         "  ragcli exclude add second-brain '.*/'\n"
         "  ragcli exclude add second-brain '.claude/' '.codex/' '.git/'\n"
+        "  ragcli exclude ls second-brain --expanded\n"
     )
     exclude = sub.add_parser(
         "exclude",
@@ -625,6 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ex_ls.add_argument("name")
+    ex_ls.add_argument("--expanded", action="store_true", help="mostra l'espansione live delle cartelle escluse")
     ex_ls.set_defaults(func=cmd_exclude_ls)
 
     start = sub.add_parser("start", help="avvia il server di una KB")
