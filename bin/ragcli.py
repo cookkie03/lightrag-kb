@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -172,13 +173,18 @@ def cmd_exclude_add(args: argparse.Namespace) -> None:
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     patterns = kb.setdefault("exclude", [])
-    if args.pattern in patterns:
-        print(f"Pattern già presente: {args.pattern}")
-        return
-    patterns.append(args.pattern)
+    added: list[str] = []
+    for pattern in _normalize_exclude_patterns(args.pattern):
+        if pattern in patterns or pattern in added:
+            continue
+        patterns.append(pattern)
+        added.append(pattern)
     save_registry(registry)
     write_kb_env(kb)
-    print(f"✓ Escluso da '{args.name}': {args.pattern}")
+    if added:
+        print(f"✓ Esclusi da '{args.name}': {', '.join(added)}")
+    else:
+        print(f"Nessun nuovo pattern da aggiungere per '{args.name}'.")
 
 
 def cmd_exclude_rm(args: argparse.Namespace) -> None:
@@ -187,14 +193,33 @@ def cmd_exclude_rm(args: argparse.Namespace) -> None:
     if not kb:
         sys.exit(f"KB '{args.name}' non trovata.")
     patterns = kb.get("exclude", [])
-    if args.pattern not in patterns:
-        sys.exit(f"Pattern non presente: {args.pattern}")
-    patterns.remove(args.pattern)
+    removed: list[str] = []
+    for pattern in _normalize_exclude_patterns(args.pattern):
+        if pattern not in patterns:
+            continue
+        patterns.remove(pattern)
+        removed.append(pattern)
     if not patterns:
         kb["exclude"] = []
     save_registry(registry)
     write_kb_env(kb)
-    print(f"✓ Rimossa esclusione da '{args.name}': {args.pattern}")
+    if removed:
+        print(f"✓ Rimosse esclusioni da '{args.name}': {', '.join(removed)}")
+    else:
+        sys.exit(f"Nessun pattern rimosso da '{args.name}'.")
+
+
+def _normalize_exclude_patterns(raw_patterns: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for raw in raw_patterns:
+        for token in re.split(r"[;,]", raw):
+            pattern = token.strip()
+            if not pattern:
+                continue
+            if pattern.endswith("/") and not pattern.endswith("/*") and not pattern.endswith("/**"):
+                pattern = pattern + "*"
+            normalized.append(pattern)
+    return normalized
 
 
 def cmd_start(args: argparse.Namespace) -> None:
@@ -405,15 +430,42 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--force", action="store_true", help="rigenera derivati e riallinea forzatamente la KB")
     ingest.set_defaults(func=cmd_ingest)
 
-    exclude = sub.add_parser("exclude", help="gestione pattern di esclusione")
+    exclude_help = (
+        "Pattern glob stile fnmatch.\n"
+        "- usa / per indicare una cartella, ad esempio '.git/*' o 'notes/drafts/*'\n"
+        "- usa * per prendere tutti i nomi, all'inizio o alla fine del pezzo di nome, ad esempio '*.pdf', 'tmp*' o '*/assets/*'\n"
+        "- puoi passare più pattern nella stessa istruzione, separati da spazi oppure con virgole o ';'\n"
+        "- se un pattern termina con /, viene convertito automaticamente in /*\n"
+        "- quota sempre i pattern per evitare l'espansione della shell\n"
+        "Esempi:\n"
+        "  ragcli exclude add second-brain '.claude/*' '.codex/*' '.git/*'\n"
+        "  ragcli exclude add second-brain '.*/' 'tmp/*'\n"
+        "  ragcli exclude add second-brain '.claude/*,.codex/*;.git/*'\n"
+    )
+    exclude = sub.add_parser(
+        "exclude",
+        help="gestione pattern di esclusione",
+        description=exclude_help,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     exclude_sub = exclude.add_subparsers(dest="exclude_cmd", required=True)
-    ex_add = exclude_sub.add_parser("add", help="aggiunge un pattern di esclusione")
+    ex_add = exclude_sub.add_parser(
+        "add",
+        help="aggiunge uno o più pattern di esclusione",
+        description=exclude_help,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ex_add.add_argument("name")
-    ex_add.add_argument("pattern")
+    ex_add.add_argument("pattern", nargs="+")
     ex_add.set_defaults(func=cmd_exclude_add)
-    ex_rm = exclude_sub.add_parser("rm", help="rimuove un pattern di esclusione")
+    ex_rm = exclude_sub.add_parser(
+        "rm",
+        help="rimuove uno o più pattern di esclusione",
+        description=exclude_help,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     ex_rm.add_argument("name")
-    ex_rm.add_argument("pattern")
+    ex_rm.add_argument("pattern", nargs="+")
     ex_rm.set_defaults(func=cmd_exclude_rm)
 
     start = sub.add_parser("start", help="avvia il server di una KB")
