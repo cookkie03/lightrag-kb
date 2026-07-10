@@ -1,0 +1,147 @@
+# obsidian-mcp-oauth-shim
+
+Piccolo authorization server OAuth 2.1 (DCR + PKCE) che espone l'MCP del plugin
+Obsidian **"Local REST API with MCP"** (`https://127.0.0.1:27124/mcp/`) come
+Custom Connector remoto per claude.ai, tramite Tailscale Funnel.
+
+Il plugin usa un unico bearer token statico che claude.ai non può configurare
+direttamente (i connector di claude.ai supportano solo OAuth). Questo shim fa
+da ponte: implementa un vero (minimo) authorization server, e fa da reverse
+proxy verso il plugin sostituendo il token OAuth con la vera API key.
+
+## Componenti
+
+- `app/main.py` — endpoint FastAPI (discovery, DCR, authorize, token, proxy `/mcp`)
+- `app/db.py` — persistenza SQLite (`shim.db`): client registrati, authorization code, refresh token
+- `app/security.py` — JWT (access token), PKCE S256, hashing
+- `app/config.py` — carica `.env`, genera `JWT_SECRET` e `CONSENT_PASSCODE` al primo avvio se assenti
+- `manage.py` — CLI di amministrazione
+- `com.luca.obsidianmcpoauthshim.plist` (in `~/Library/LaunchAgents/`) — servizio launchd
+
+## Configurazione (`.env`)
+
+File in `~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim/.env` (permessi `600`). Campi principali:
+
+| Chiave | Significato |
+|---|---|
+| `ISSUER_URL` | URL pubblico dello shim (hostname Tailscale Funnel) |
+| `OBSIDIAN_MCP_URL` | Endpoint locale del plugin (default `https://127.0.0.1:27124`) |
+| `OBSIDIAN_PLUGIN_DATA_JSON` | Path al `data.json` del plugin — **fonte autoritativa** della API key, letta live ad ogni richiesta |
+| `OBSIDIAN_API_KEY` | Fallback usato solo se `OBSIDIAN_PLUGIN_DATA_JSON` non è raggiungibile — normalmente non serve toccarlo |
+| `JWT_SECRET` | Auto-generato al primo avvio, firma gli access token |
+| `CONSENT_PASSCODE` | Auto-generato al primo avvio, richiesto nella pagina di consenso `/authorize` |
+
+**La API key non va copiata a mano**: `app/main.py` la legge in tempo reale
+da `.obsidian/plugins/obsidian-local-rest-api/data.json` nel vault (funzione
+`_current_obsidian_api_key()`), quindi segue automaticamente eventuali
+rigenerazioni del plugin (es. dopo sync da un altro device). `OBSIDIAN_API_KEY`
+in `.env` resta solo come fallback se quel file diventasse irraggiungibile.
+
+Il passcode di consenso attuale è in `.env` sotto `CONSENT_PASSCODE`. Ti servirà
+ogni volta che approvi un nuovo client (es. la prima connessione di claude.ai).
+
+## Avviare / fermare il servizio
+
+Gira come LaunchAgent (`com.luca.obsidianmcpoauthshim`), già installato e avviato:
+
+```bash
+# stato
+launchctl list | grep obsidianmcpoauthshim
+
+# riavvio (es. dopo aver modificato .env)
+launchctl kickstart -k gui/$(id -u)/com.luca.obsidianmcpoauthshim
+
+# stop
+launchctl bootout gui/$(id -u)/com.luca.obsidianmcpoauthshim
+
+# restart da zero
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.luca.obsidianmcpoauthshim.plist
+```
+
+Log applicativi: `~/Library/Logs/obsidian-mcp-oauth-shim/stdout.log` e `stderr.log`.
+
+Il servizio ascolta solo su `127.0.0.1:8420`; l'esposizione pubblica è a carico
+di Tailscale Funnel (vedi sotto), non del servizio stesso.
+
+## Avvio da `~/Documents`
+
+**Nota storica**: il progetto è stato temporaneamente in `~/Documents/Scripts/obsidian-mcp-oauth-shim/`
+e ha avuto **due episodi separati** (2026-07-02 e 2026-07-03) di `launchd` che
+smette di riuscire a fare lo spawn del processo Python: `launchctl list` mostra
+PID `-`, `last exit code = 78 (EX_CONFIG)`, **zero log del processo Python**
+(non parte proprio). Il secondo episodio si è verificato da solo durante la
+notte, senza che nessuno spostasse/copiasse nulla — quindi non è (solo) un
+problema di `mv`/`cp` che porta con sé extended attribute residui: **c'è
+qualcosa di intermittente specifico di `~/Documents`** (ipotesi non
+confermate: Time Machine, Spotlight, rivalutazione periodica di ACL) che
+blocca `launchd` in modo silenzioso e imprevedibile. Il progetto è stato
+riportato in `~/obsidian-mcp-oauth-shim/` (fuori da `Documents`), dove non si
+è mai verificato. Per mantenerlo nel repository lightrag, il LaunchAgent
+esegue invece il piccolo launcher esterno in `~/.local/bin/`; questo è l'unico
+file non di sistema lasciato fuori dal repository e serve esclusivamente ad
+aggirare quel limite di `launchd`.
+
+**Se in futuro serve comunque spostarlo**: evita `~/Documents` e le sue
+sottocartelle per qualunque servizio Python/venv gestito da `launchd`. Va bene
+invece per script `bash` semplici (es. `obsidian-watchdog.sh`, che gira senza
+problemi da `~/Documents/Scripts/`) — il problema sembra specifico
+all'esecuzione di interpreti/venv, non agli script di testo.
+
+Se proprio serve rilocare questo progetto, non fare mai `mv`/`cp` di `.venv/`:
+ricrealo sempre da zero nella nuova posizione:
+
+```bash
+cd ~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+# poi aggiorna i path nel plist e bootstrap
+```
+
+## Tailscale Funnel
+
+Verificato: Tailscale standalone (system extension, bundle `io.tailscale.ipn.macos`),
+Funnel abilitato sul tailnet. Hostname pubblico:
+`https://lucas-macbook-air.tail234659.ts.net`.
+
+Comandi già eseguiti per esporre lo shim (porta 8420 → 443 pubblica):
+
+```bash
+tailscale funnel --bg 8420      # avvia in background, sopravvive a logout/riavvio Tailscale
+tailscale funnel status         # verifica configurazione attiva
+tailscale funnel --https=443 off   # per disattivare l'esposizione pubblica
+```
+
+**Nota**: Funnel espone lo shim (non la porta 27124 del plugin) a chiunque su
+internet conosca l'URL. La superficie protetta è: passcode sulla pagina di
+consenso + PKCE obbligatorio + JWT firmato. Non condividere `CONSENT_PASSCODE`
+né il contenuto di `.env`.
+
+## Rigenerare i secret
+
+```bash
+cd ~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim
+.venv/bin/python manage.py rotate-jwt-secret   # invalida tutti gli access token in circolazione
+.venv/bin/python manage.py rotate-passcode     # nuovo passcode per /authorize
+```
+
+Dopo la rotazione, riavvia il servizio (vedi sopra).
+
+## Revocare un client registrato
+
+```bash
+cd ~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim
+.venv/bin/python manage.py list-clients
+.venv/bin/python manage.py revoke-client <client_id>
+```
+
+## URL da inserire in claude.ai
+
+Impostazioni → Connectors → Add custom connector → **Remote MCP server URL**:
+
+```
+https://lucas-macbook-air.tail234659.ts.net/mcp
+```
+
+Claude.ai eseguirà da solo la discovery OAuth, la registrazione dinamica del
+client e ti mostrerà la pagina di consenso dove inserire il `CONSENT_PASSCODE`.

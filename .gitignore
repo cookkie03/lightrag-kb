@@ -12,12 +12,16 @@ __pycache__/
 *.pyc
 .venv-mcp/
 .venv-engine/
+services/obsidian-mcp-oauth-shim/.venv/
 
 # macOS
 .DS_Store
 
 # Log e stato runtime locale
 kb/*/lightrag.log
+services/obsidian-mcp-oauth-shim/.env
+services/obsidian-mcp-oauth-shim/shim.db
+services/obsidian-mcp-oauth-shim/logs/
 .claude/
 .codex
 .agents
