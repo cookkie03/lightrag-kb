@@ -254,6 +254,9 @@ class IngestionWorker:
                 raise IngestionWorkerError(f"File di manifest mancante in staging: {manifest_file}")
             manifest = StagedJobManifest.load_from_file(manifest_file)
 
+        if (manifest.job_id, manifest.kb_id, manifest.source_id) != (job.job_id, job.kb_id, job.source_id):
+            return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Manifest identity does not match job")
+
         source_id = manifest.source_id
         kb_id = manifest.kb_id
 
