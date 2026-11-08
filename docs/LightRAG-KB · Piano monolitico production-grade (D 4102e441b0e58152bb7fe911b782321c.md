@@ -36,7 +36,7 @@ Debian: /srv/lightrag-kb/
   kb/kb-id/                catalogo JSON, derived, storage LightRAG, reports, logs
   staging/job-id/        ORIGINALI TEMPORANEI (quota, cleanup)
   backup/                  copie consistenti configurabili
-  client/[kb-sync.py](http://kb-sync.py)        script effimero distribuito al Mac
+  sync/client.py        script effimero distribuito al Mac
   mcp/kb_[router.py](http://router.py)         un solo server MCP stdio
   LightRAG backend KB-A on 127.0.0.1:9621, KB-B on :9622, ...
 ```
@@ -67,7 +67,7 @@ Nel file `kb/<kb-id>/catalog.json`, oggetto JSON versionato contenente insieme l
 **Una invocazione rappresentativa da implementare (il comando shell, non un CLI preesistente):**
 
 ```bash
-ssh -T debian-tailnet 'cat /srv/lightrag-kb/client/[kb-sync.py](http://kb-sync.py)' <br>  | python3 - sync <br>      --kb second-brain <br>      --source mac-second-brain <br>      --folder "$HOME/Second-Brain" <br>      --remote debian-tailnet <br>      --delete-policy guarded <br>      --wait <br>      --json
+ssh -T debian-tailnet 'cat /srv/lightrag-kb/sync/client.py' <br>  | python3 - sync <br>      --kb second-brain <br>      --source mac-second-brain <br>      --folder "$HOME/Second-Brain" <br>      --remote debian-tailnet <br>      --delete-policy guarded <br>      --wait <br>      --json
 ```
 
 L'accesso SSH al server implica fiducia nel codice che si sta eseguendo: limitare la consegna del client ad account/host autorizzati, evitare pipe da siti terzi; aggiungere verifica SHA256/versione dello script quando si passa da prototipo a installazione persistente. **Nessun parametro password in CLI/MCP/log**: usare SSH config, chiavi, agent e profili. Il nome `source` e la KB sono identificativi stabili registrati al primo sync, mai automaticamente riassegnati a un'altra folder senza migrazione esplicita. Il parametro `folder` è obbligatorio; `--remote` e `--source` possono derivare dal profilo/registry dopo il primo setup. L'agente può usare la stessa procedura da un host con accesso ai file NAS; **non** passare al MCP un path Mac sperando che Debian lo legga.
