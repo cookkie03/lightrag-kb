@@ -268,6 +268,8 @@ class IngestionWorker:
 
             # Step 2: Validate safe sandboxed paths across all manifest actions (§11 #10)
             for act in manifest.actions:
+                if act.action not in {"add", "modify", "rename", "delete"}:
+                    return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=f"Unknown action: {act.action}")
                 try:
                     validate_safe_relative_path(act.relative_path)
                     if act.old_relative_path:
