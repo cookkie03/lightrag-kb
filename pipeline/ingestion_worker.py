@@ -376,7 +376,9 @@ class IngestionWorker:
 
                     file_size = item.size or staged_path.stat().st_size
                     mtime_ns = item.mtime_ns or staged_path.stat().st_mtime_ns
-                    b_sha = item.binary_sha256 or compute_file_sha256(staged_path)
+                    b_sha = compute_file_sha256(staged_path)
+                    if item.binary_sha256 and item.binary_sha256 != b_sha:
+                        raise ValueError(f"Checksum mismatch for '{rel_path}'")
 
                     # Parse document via pipeline.parsers
                     parsed = parse_document(
