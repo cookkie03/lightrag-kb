@@ -174,14 +174,26 @@ L'MCP espone tool definitions stabili e output piccoli/paginati. Quando una KB �
 
 # 9. File-by-file implementation map
 
+## Decisioni architetturali approvate
+
+- CLI e MCP sono interfacce sottili con elenchi propri di comandi/tool; chiamano direttamente gli stessi moduli funzionali. Validazione, sicurezza, logica e gestione degli errori non si duplicano. Non introdurre un ulteriore livello `core/operations.py`.
+- `storage/registry.py` gestisce l'elenco globale e la configurazione delle KB; `storage/catalog.py` gestisce le sorgenti, occorrenze, documenti e job di una singola KB; `storage/json_store.py` condivide solo la persistenza JSON sicura. Separare dal registry l'eventuale gestione dei processi.
+- I dati applicativi sono memorizzati in JSON, non SQLite. Preservare i dati preesistenti; qualsiasi migrazione richiede inventario, backup e verifica non distruttiva. I formati interni della release LightRAG devono essere verificati separatamente.
+- `sync/client.py` è il client eseguibile sul Mac senza installare il motore; `sync/server.py` prepara e valida sul Debian staging, manifest e commit. Il worker in `pipeline/` elabora i job validati. La directory operativa di staging resta necessaria.
+- `pipeline/parsers.py` gestisce i formati e produce derivati; `analysis/` implementa la logica condivisa delle analisi esposte da CLI e MCP. Creare i singoli moduli di analisi solo insieme alla rispettiva implementazione e ai test, senza file segnaposto.
+- Ogni file, funzione e classe descrive il proprio scopo; documentare invarianti e motivazioni quando rilevanti, evitando commenti ridondanti o obsoleti. Organizzare i file per responsabilità, senza conservare pipeline o router duplicati.
+- Sviluppare in un workspace isolato e integrare progressivamente commit verificati su `master`, preservando le modifiche preesistenti. Non fare push senza autorizzazione. Eliminare il codice che non serve al prodotto, dopo aver verificato dipendenze, compatibilità e contenuto delle modifiche preesistenti; non eliminare dati operativi o segreti come parte della pulizia.
+
 | File/nuovo modulo | Modifica richiesta |
 | --- | --- |
 | `bin/[ragcli.py](http://ragcli.py)` | Preservare comandi esistenti come alias; `kb create/list/start/stop/status/remove`, `source add/list`, `sync prepare/commit`, `job status/wait`, `doctor`; output `--json`; storage **sempre** Debian. |
-| `bin/kb_[registry.py](http://registry.py)` | KB multiple con molte sorgenti, configurazione path Debian, source ID stabile, niente `source_dir/.lightrag`. |
-| `bin/[ingest.py](http://ingest.py)` | Spostare da `os.walk(source_dir)` a ingest manifest staged; nuovi/modificati/rename/delete, safety guards, derived persistenti, retry e progress. |
+| `storage/registry.py` | Registry JSON globale: KB multiple con molte sorgenti, configurazione path Debian e source ID stabile; niente `source_dir/.lightrag`. |
+| `pipeline/ingestion_worker.py` | Ingest dei manifest validati; nuovi/modificati/rename/delete, safety guards, derived persistenti, retry e progress. Gli eventuali alias precedenti non duplicano la pipeline. |
 | `bin/mcp_[clients.py](http://clients.py)` | Registrare **un** MCP SSH-stdio remoto per Claude Code/Codex; niente registrazioni per singola KB. |
 | `mcp/kb_[router.py](http://router.py)` (nuovo) | Router per KB, riuso ask/retrieve_context/find_documents, list_kbs/job_status/evidence; feature MCP A1–A6 dopo implementazione. |
-| `client/[kb-sync.py](http://kb-sync.py)` (nuovo) | Script effimero per Mac: snapshot source, delta, transfer rsync, manifest, job wait, output JSON. |
+| `sync/client.py` | Script effimero per Mac: snapshot source, delta, transfer rsync, manifest, job wait, output JSON. |
+| `sync/server.py` | Preparazione staging, validazione di manifest e file, controlli di sicurezza e accettazione idempotente dei job sul Debian. |
+| `storage/json_store.py` | Lock interprocesso e snapshot JSON atomici condivisi, senza logica del dominio KB. |
 | `storage/[catalog.py](http://catalog.py)` (nuovo) | Catalogo JSON versionato source/file/doc/job, mapping aliases, lock, scrittura atomica e migrazioni minime. |
 | `pipeline/[parsers.py](http://parsers.py)` (nuovo) | Docling/OCR/ASR Linux, JSON sidecar, checksum, metadata source. |
 | `pipeline/[indexer.py](http://indexer.py)` (nuovo) | API adapter LightRAG, doc tracking, duplicate responses, protected update/recovery. |
