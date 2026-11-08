@@ -373,6 +373,9 @@ class IngestionWorker:
 
                     if staged_path is None or not staged_path.is_file():
                         raise FileNotFoundError(f"File sorgente per '{rel_path}' non trovato in staging incoming")
+                    if not staging_incoming:
+                        raise SafePathError("Staging directory is required")
+                    validate_safe_relative_path(staged_path.relative_to(staging_incoming), base_dir=staging_incoming, allow_symlinks=False)
 
                     file_size = item.size or staged_path.stat().st_size
                     mtime_ns = item.mtime_ns or staged_path.stat().st_mtime_ns

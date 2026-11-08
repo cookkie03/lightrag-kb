@@ -24,7 +24,9 @@ def test_manifest_identity_mismatch_is_rejected(tmp_path):
         assert result.stage != "COMPLETED"
 
 
-def test_staged_symlink_outside_sandbox_is_rejected(tmp_path):
+def test_staged_symlink_outside_sandbox_is_rejected(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("pipeline.ingestion_worker.parse_document", lambda **kwargs: calls.append(kwargs))
     with Catalog(":memory:") as catalog:
         catalog.add_source("source", "Source")
         catalog.create_job("job", "kb", source_id="source")
@@ -37,4 +39,5 @@ def test_staged_symlink_outside_sandbox_is_rejected(tmp_path):
         action = StagedAction("add", "file.txt", staged_filename="file.txt")
         result = worker.process_job("job", StagedJobManifest("job", "kb", "source", actions=[action]))
         assert result.stage != "COMPLETED"
+        assert not calls
         assert outside.read_text() == "outside"
