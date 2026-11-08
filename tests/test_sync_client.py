@@ -33,3 +33,11 @@ def test_rename_is_not_inferred_when_another_copy_exists():
     assert result["rename"] == []
     assert result["add"] == ["new"]
     assert result["delete"] == ["old"]
+
+
+def test_rename_with_modified_existing_path_is_not_inferred():
+    old = [{"path": "old", "sha256": "a"}, {"path": "kept", "sha256": "b"}]
+    new = [{"path": "new", "sha256": "b"}, {"path": "kept", "sha256": "a"}]
+    result = diff(old, new, complete=True)
+    assert result["rename"] == []
+    assert result["delete"] == ["old"]

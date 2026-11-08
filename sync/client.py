@@ -51,8 +51,9 @@ def diff(previous, current, complete):
     for old_path in sorted(removed):
         digest = old[old_path].get("sha256")
         if digest and old_counts[digest] == new_counts[digest] == 1:
-            new_path = next(path for path in added if new[path].get("sha256") == digest)
-            renames.append({"old": old_path, "new": new_path})
+            candidate = [path for path in added if new[path].get("sha256") == digest]
+            if len(candidate) == 1:
+                renames.append({"old": old_path, "new": candidate[0]})
     removed.difference_update(item["old"] for item in renames)
     added.difference_update(item["new"] for item in renames)
     return {"add": sorted(added), "modify": modified, "rename": renames, "delete": sorted(removed), "unchanged": sorted(set(old) & set(new) - set(modified))}
