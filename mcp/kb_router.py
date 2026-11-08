@@ -123,7 +123,7 @@ def _normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
 
 
 class KBRouter:
-    """Multi-KB router coordinating registry lookups, LightRAG backend routing, and SQLite Catalog."""
+    """Route KB requests to the registry, LightRAG backend and JSON catalog."""
 
     def __init__(
         self,

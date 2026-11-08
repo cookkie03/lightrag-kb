@@ -430,7 +430,7 @@ def parse_text_file(
     b_sha = binary_sha256 or compute_file_sha256(p)
     raw_bytes = p.read_bytes()
 
-    # Strip NUL bytes which are illegal in SQLite / C strings
+    # Strip NUL bytes before sending extracted text to downstream consumers.
     cleaned_bytes = raw_bytes.replace(b"\x00", b"")
 
     encoding_used = "utf-8"

@@ -132,7 +132,7 @@ class StagedJobManifest:
 
 
 class IngestionWorker:
-    """Processes staged sync/push jobs against SQLite Catalog and LightRAG (§4, §5)."""
+    """Process staged sync and push jobs against the JSON catalog and LightRAG."""
 
     def __init__(
         self,
