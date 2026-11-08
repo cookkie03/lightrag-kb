@@ -45,8 +45,8 @@ def diff(previous, current, complete):
     removed = set(old) - set(new) if complete else set()
     added = set(new) - set(old)
     modified = sorted(path for path in set(old) & set(new) if old[path].get("sha256") != new[path].get("sha256"))
-    old_counts = Counter(old[path].get("sha256") for path in removed)
-    new_counts = Counter(new[path].get("sha256") for path in added)
+    old_counts = Counter(item.get("sha256") for item in old.values())
+    new_counts = Counter(item.get("sha256") for item in new.values())
     renames = []
     for old_path in sorted(removed):
         digest = old[old_path].get("sha256")

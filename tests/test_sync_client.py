@@ -24,3 +24,12 @@ def test_full_diff_recognizes_only_unambiguous_renames():
     result = diff(old, new, complete=True)
     assert result["rename"] == [{"old": "old", "new": "new"}]
     assert not result["add"] and not result["delete"]
+
+
+def test_rename_is_not_inferred_when_another_copy_exists():
+    old = [{"path": "old", "sha256": "abc"}, {"path": "existing", "sha256": "abc"}]
+    new = [{"path": "new", "sha256": "abc"}, {"path": "existing", "sha256": "abc"}]
+    result = diff(old, new, complete=True)
+    assert result["rename"] == []
+    assert result["add"] == ["new"]
+    assert result["delete"] == ["old"]
