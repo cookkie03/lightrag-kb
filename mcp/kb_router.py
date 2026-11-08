@@ -150,16 +150,14 @@ class KBRouter:
         return find_kb(self.get_registry(), kb_name)
 
     def get_catalog(self, kb_name: str) -> Catalog:
-        """Open or initialize SQLite Catalog for the specified KB."""
+        """Open the KB's JSON catalog without silently bypassing legacy data."""
         if self.kb_root is not None:
-            db_path = self.kb_root / kb_name / "catalog.sqlite"
-            return Catalog(db_path)
+            return Catalog.open_for_kb(kb_name, kb_root=self.kb_root)
         kb = self.get_kb(kb_name)
         if kb and kb.get("data_dir"):
-            candidate = Path(kb["data_dir"]) / "catalog.sqlite"
-            if candidate.exists():
-                return Catalog(candidate)
-        return Catalog.open_for_kb(kb_name, kb_root=self.kb_root or DEFAULT_KB_ROOT)
+            directory = Path(kb["data_dir"])
+            return Catalog.open_for_kb(directory.name, kb_root=directory.parent)
+        return Catalog.open_for_kb(kb_name, kb_root=DEFAULT_KB_ROOT)
 
     def check_server_health(self, port: int, host: str = "127.0.0.1", timeout: float = 2.0) -> bool:
         """Check whether the LightRAG HTTP server is healthy on localhost:port."""

@@ -1,7 +1,7 @@
 """Unit tests for storage/catalog.py according to §3 of the monocentric plan.
 
 Tests:
-- Schema initialization and migrations (SQLite per KB)
+- JSON snapshot initialization and validation per KB
 - Sources CRUD, validation, deletion policy, scan state
 - Documents CRUD, synthetic canonical doc IDs, reference count reconstruction
 - Files CRUD, (source_id, relative_path) uniqueness, rename without re-embedding
@@ -16,7 +16,7 @@ Tests:
 
 from __future__ import annotations
 
-import sqlite3
+import json
 import sys
 from pathlib import Path
 
@@ -48,7 +48,7 @@ def memory_catalog() -> Catalog:
 
 @pytest.fixture
 def disk_catalog(tmp_path: Path) -> Catalog:
-    db_file = tmp_path / "catalog.sqlite"
+    db_file = tmp_path / "catalog.json"
     cat = Catalog(db_file)
     yield cat
     cat.close()
@@ -60,29 +60,25 @@ def disk_catalog(tmp_path: Path) -> Catalog:
 
 
 def test_catalog_init_memory_and_file(tmp_path: Path):
-    # In-memory catalog
     with Catalog(":memory:") as cat:
         assert cat.path is None
-        cur = cat.connection.execute("PRAGMA foreign_keys")
-        assert cur.fetchone()[0] == 1
-        cur = cat.connection.execute("SELECT version FROM schema_migrations")
-        assert cur.fetchone()[0] == 1
+        cat.add_source("local", "Local")
+        assert cat.get_source("local").name == "Local"
 
-    # On-disk catalog
-    db_path = tmp_path / "test_kb" / "catalog.sqlite"
+    db_path = tmp_path / "test_kb" / "catalog.json"
     with Catalog(db_path) as cat:
         assert cat.path == db_path.resolve()
-        assert db_path.exists()
-        cur = cat.connection.execute("PRAGMA journal_mode")
-        assert cur.fetchone()[0].lower() == "wal"
+        cat.add_source("local", "Local")
+    assert json.loads(db_path.read_text())["version"] == 1
 
 
 def test_catalog_open_for_kb(tmp_path: Path):
     kb_root = tmp_path / "kbs"
     cat = Catalog.open_for_kb("kb-alpha", kb_root=kb_root)
     try:
-        expected_path = kb_root / "kb-alpha" / "catalog.sqlite"
+        expected_path = kb_root / "kb-alpha" / "catalog.json"
         assert cat.path == expected_path.resolve()
+        cat.add_source("local", "Local")
         assert expected_path.exists()
     finally:
         cat.close()
@@ -282,7 +278,7 @@ def test_file_lifecycle_and_unique_constraint(memory_catalog: Catalog):
     initial_id = f.id
 
     # Foreign key enforcement: non-existent canonical doc raises IntegrityError
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError):
         cat.record_file(
             source_id="src1",
             relative_path="other.pdf",
@@ -515,7 +511,7 @@ def test_job_lifecycle_and_idempotency(memory_catalog: Catalog):
     assert found.job_id == "job-uuid-001"
 
     # Duplicate idempotency key must raise IntegrityError (§4 idempotency)
-    with pytest.raises(sqlite3.IntegrityError):
+    with pytest.raises(ValueError):
         cat.create_job(
             job_id="job-uuid-002",
             kb_id="kb-default",
