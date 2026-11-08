@@ -31,6 +31,7 @@ class JsonStore:
                     raise ValueError("invalid catalog snapshot") from exc
                 if not isinstance(data, dict) or data.get("version") != 1 or any(
                     not isinstance(data.get(key), dict)
+                    or any(not isinstance(record, dict) for record in data[key].values())
                     for key in ("sources", "files", "documents", "jobs")
                 ):
                     raise ValueError("invalid or unsupported catalog snapshot")
