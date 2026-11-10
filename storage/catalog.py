@@ -290,6 +290,7 @@ class Catalog:
                 return False
             if canonical_doc_id not in data["documents"]:
                 return False
+            # No active references remain; clear inactive links before removing the document.
             for occurrence in data["files"].values():
                 if occurrence.get("canonical_doc_id") == canonical_doc_id:
                     occurrence["canonical_doc_id"] = None
@@ -397,6 +398,7 @@ class Catalog:
         """Group identical original files with their source metadata."""
         with self._snapshot() as data:
             groups = {}
+            # Each eligible occurrence enters exactly one digest group in stable path order.
             for item in sorted(data["files"].values(), key=lambda f: (f["source_id"], f["relative_path"])):
                 if not item["binary_sha256"] or (active_only and not item["active"]):
                     continue
@@ -445,12 +447,25 @@ class Catalog:
             job["updated_at"] = utc_now_iso()
             return JobRecord(**copy.deepcopy(job))
 
-            return JobRecord(**copy.deepcopy(job))
-
     def list_jobs(self, kb_id=None, source_id=None, stage=None, limit=50):
         """List recent jobs with optional KB, source and stage filters."""
         with self._snapshot() as data:
             matching_jobs = []
+            for job in data["jobs"].values():
+                if kb_id is not None and job["kb_id"] != kb_id:
+                    continue
+                if source_id is not None and job["source_id"] != source_id:
+                    continue
+                if stage is not None and job["stage"] != stage:
+                    continue
+                matching_jobs.append(job)
+
+            matching_jobs.sort(key=lambda job: job["created_at"], reverse=True)
+            if limit is not None:
+                matching_jobs = matching_jobs[:limit]
+
+            return [JobRecord(**copy.deepcopy(job)) for job in matching_jobs]
+
     def increment_job_counter(self, job_id, counter_name, delta=1):
         """Increment a job counter under the same lock as the snapshot write."""
         with self._snapshot() as data:
