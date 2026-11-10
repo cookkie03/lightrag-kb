@@ -91,6 +91,7 @@ def test_worker_recovery_preserves_old_content_at_same_artifact_path(tmp_path):
         indexer.index_new(
             old_parsed, "source", "note.txt", 10, 1, artifact_path=old_artifact
         )
+        assert old_artifact.read_text(encoding="utf-8") == "VERSIONE_1"
 
         incoming = staging / "job" / "incoming"
         incoming.mkdir(parents=True)
