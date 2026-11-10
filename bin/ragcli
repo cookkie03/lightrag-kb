@@ -7,7 +7,7 @@ while [ -L "$SOURCE" ]; do
   [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
 done
 HERE="$(cd "$(dirname "$SOURCE")" && pwd)"
-ENGINE_PY="$HERE/../.venv-engine/bin/python"
+ENGINE_PY="$HERE/../.venv/bin/python"
 if [ -x "$ENGINE_PY" ]; then
   exec "$ENGINE_PY" "$HERE/ragcli.py" "$@"
 fi

@@ -4,7 +4,8 @@
 # muore (crash, kill, reboot, OOM...) lo fa ripartire entro 30s, in automatico.
 set -uo pipefail
 
-RAGCLI="$HOME/Documents/lightrag-kb/bin/ragcli"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RAGCLI="$SCRIPT_DIR/ragcli"
 
 while true; do
     "$RAGCLI" server start second-brain >>"/tmp/lightrag-second-brain-watchdog-loop.log" 2>&1

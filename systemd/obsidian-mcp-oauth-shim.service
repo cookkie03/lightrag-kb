@@ -1,0 +1,15 @@
+[Unit]
+Description=LightRAG MCP OAuth Shim
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=__SHIM_ENV_FILE__
+WorkingDirectory=__SHIM_WORKDIR__
+ExecStart=__ENGINE_PYTHON__ -m uvicorn app.main:app --host ${SHIM_BIND_HOST} --port ${SHIM_BIND_PORT}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

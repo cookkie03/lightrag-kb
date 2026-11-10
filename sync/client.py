@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 
+# Build a snapshot that marks uncertain scans incomplete to prevent false deletes.
 def snapshot(folder):
     """Enumerate regular files without following symlinks and report scan errors."""
     root = Path(folder)
@@ -13,15 +14,25 @@ def snapshot(folder):
     if not root.is_dir() or root.is_symlink():
         return {"files": [], "scan_complete": False, "scan_errors": ["source folder unavailable"]}
 
+    try:
+        root_identity = root.stat().st_dev, root.stat().st_ino
+    except OSError as error:
+        return {"files": [], "scan_complete": False, "scan_errors": [str(error)]}
+
     def onerror(error):
         """Make enumeration failures visible rather than implying deletions."""
         errors.append(str(error))
 
+    # Keep traversal within real directories; any scan error disables deletion.
     for directory, dirs, names in os.walk(root, followlinks=False, onerror=onerror):
         dirs[:] = [name for name in dirs if not (Path(directory) / name).is_symlink()]
         for name in names:
             path = Path(directory) / name
-            if path.is_symlink() or not path.is_file():
+            if path.is_symlink():
+                if not path.exists():
+                    errors.append(f"{path}: broken symlink")
+                continue
+            if not path.is_file():
                 continue
             try:
                 before = path.stat()
@@ -35,6 +46,12 @@ def snapshot(folder):
                 files.append({"path": path.relative_to(root).as_posix(), "size": after.st_size, "mtime_ns": after.st_mtime_ns, "sha256": digest.hexdigest()})
             except OSError as error:
                 errors.append(f"{path}: {error}")
+    try:
+        final = root.stat()
+        if root.is_symlink() or (final.st_dev, final.st_ino) != root_identity:
+            errors.append("source folder changed during scan")
+    except OSError as error:
+        errors.append(str(error))
     return {"files": sorted(files, key=lambda f: f["path"]), "scan_complete": not errors, "scan_errors": errors}
 
 
@@ -48,12 +65,14 @@ def diff(previous, current, complete):
     old_counts = Counter(item.get("sha256") for item in old.values())
     new_counts = Counter(item.get("sha256") for item in new.values())
     renames = []
+    added_by_digest = {new[path].get("sha256"): path for path in added}
+    # A rename is safe to infer only when the digest is unique in both snapshots
+    # and its new occurrence is an added path, not an existing modified file.
     for old_path in sorted(removed):
         digest = old[old_path].get("sha256")
         if digest and old_counts[digest] == new_counts[digest] == 1:
-            candidate = [path for path in added if new[path].get("sha256") == digest]
-            if len(candidate) == 1:
-                renames.append({"old": old_path, "new": candidate[0]})
+            if digest in added_by_digest:
+                renames.append({"old": old_path, "new": added_by_digest[digest]})
     removed.difference_update(item["old"] for item in renames)
     added.difference_update(item["new"] for item in renames)
     return {"add": sorted(added), "modify": modified, "rename": renames, "delete": sorted(removed), "unchanged": sorted(set(old) & set(new) - set(modified))}

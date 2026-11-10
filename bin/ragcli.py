@@ -2,13 +2,24 @@
 from __future__ import annotations
 
 import argparse
+import json
+import uuid
+import os
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-import requests
+# CLI scripts run from bin/, so expose the repository's Python packages.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+try:
+    import requests
+except ModuleNotFoundError:  # pragma: no cover - exercised via monkeypatch in tests
+    requests = None
 
 import mcp_clients
 from kb_registry import (
@@ -31,12 +42,253 @@ from kb_registry import (
 )
 
 
+LINUX_SYSTEMD_UNITS = (
+    "lightrag-server@.service",
+    "lightrag-watchdog@.service",
+    "lightrag-mcp@.service",
+    "obsidian-mcp-oauth-shim.service",
+)
+def _completed_process(args: list[str], returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
+
+
+def _normalize_service_name(name: str) -> str:
+    normalized = name.strip()
+    if not normalized:
+        raise SystemExit("Nome servizio mancante.")
+    if "." not in normalized:
+        normalized = f"{normalized}.service"
+    return normalized
+
+
+def _systemd_user_dir() -> Path:
+    return Path.home() / ".config" / "systemd" / "user"
+
+
+def _configured_public_kb(env: dict[str, str]) -> str | None:
+    kb_name = env.get("PUBLIC_MCP_KB", "").strip()
+    if not kb_name:
+        return None
+    try:
+        registry = load_registry(env)
+    except Exception:
+        return None
+    return kb_name if find_kb(registry, kb_name) else None
+
+
+def _status_linux_units(env: dict[str, str] | None = None) -> list[str]:
+    env = env or global_env()
+    public_kb = _configured_public_kb(env)
+    if public_kb:
+        return [
+            f"lightrag-server@{public_kb}.service",
+            f"lightrag-watchdog@{public_kb}.service",
+            f"lightrag-mcp@{public_kb}.service",
+            "obsidian-mcp-oauth-shim.service",
+        ]
+    return list(LINUX_SYSTEMD_UNITS)
+
+
+def _manageable_linux_units(env: dict[str, str] | None = None) -> list[str]:
+    env = env or global_env()
+    public_kb = _configured_public_kb(env)
+    units = ["obsidian-mcp-oauth-shim.service"]
+    if public_kb:
+        units = [
+            f"lightrag-server@{public_kb}.service",
+            f"lightrag-watchdog@{public_kb}.service",
+            f"lightrag-mcp@{public_kb}.service",
+            *units,
+        ]
+    return units
+
+
+def _unit_template_context(repo_root: Path, home: Path, env: dict[str, str]) -> dict[str, str]:
+    shim_workdir = repo_root / "services" / "obsidian-mcp-oauth-shim"
+    shim_env_file = shim_workdir / ".env"
+    return {
+        "__REPO_ROOT__": str(repo_root),
+        "__ENGINE_PYTHON__": env["ENGINE_PYTHON"],
+        "__LIGHTRAG_SERVER_BIN__": env["LIGHTRAG_SERVER_BIN"],
+        "__HOME__": str(home),
+        "__SHIM_WORKDIR__": str(shim_workdir),
+        "__SHIM_ENV_FILE__": str(shim_env_file),
+    }
+
+
+def install_user_units(repo_root: Path, home: Path, env: dict[str, str] | None = None) -> list[Path]:
+    env = env or global_env()
+    systemd_dir = home / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+    context = _unit_template_context(repo_root, home, env)
+    installed: list[Path] = []
+    for name in LINUX_SYSTEMD_UNITS:
+        src = repo_root / "systemd" / name
+        text = src.read_text()
+        for token, value in context.items():
+            text = text.replace(token, value)
+        dst = systemd_dir / name
+        dst.write_text(text)
+        installed.append(dst)
+    return installed
+
+
+def configure_tailscale_funnel(bind_host: str, bind_port: str, public_port: str) -> list[list[str]]:
+    return [
+        ["tailscale", "serve", "--bg", public_port, f"http://{bind_host}:{bind_port}"],
+        ["tailscale", "funnel", "--bg", public_port],
+    ]
+
+
+def _systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
+    cmd = ["systemctl", "--user", *args]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return _completed_process(cmd, 127, stderr="systemctl non trovato")
+
+
+def _journalctl_user(*args: str) -> subprocess.CompletedProcess[str]:
+    cmd = ["journalctl", "--user", *args]
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return _completed_process(cmd, 127, stderr="journalctl non trovato")
+
+
+def _template_unit_status(unit: str) -> dict[str, object]:
+    unit_file = _systemd_user_dir() / unit
+    installed = unit_file.is_file()
+    return {
+        "name": unit,
+        "ok": installed,
+        "details": "installed" if installed else "missing",
+    }
+
+
+def _service_status(unit: str) -> dict[str, object]:
+    if unit.endswith("@.service"):
+        return _template_unit_status(unit)
+    result = _systemctl_user("is-active", unit)
+    details = result.stdout.strip() or result.stderr.strip() or "unknown"
+    return {
+        "name": unit,
+        "ok": result.returncode == 0 and details == "active",
+        "details": details,
+    }
+
+
+def _funnel_status(env: dict[str, str]) -> dict[str, object]:
+    public_url = env.get("SHIM_PUBLIC_URL", "").strip()
+    if not public_url or "your-node.your-tailnet.ts.net" in public_url:
+        return {
+            "name": "shim_public_url",
+            "ok": False,
+            "details": public_url or "missing",
+        }
+
+    tailscale_bin = shutil.which("tailscale")
+    if not tailscale_bin:
+        return {"name": "funnel", "ok": False, "details": "tailscale non trovato"}
+
+    result = subprocess.run([tailscale_bin, "funnel", "status"], capture_output=True, text=True)
+    output = result.stdout.strip() or result.stderr.strip() or "unknown"
+    public_port = env.get("TAILSCALE_FUNNEL_PORT", "8443")
+    ok = result.returncode == 0 and (public_url in output or public_port in output)
+    return {"name": "funnel", "ok": ok, "details": output}
+
+
+def _doctor_report() -> list[dict[str, object]]:
+    env = global_env()
+    engine_python = Path(env["ENGINE_PYTHON"]).expanduser()
+    server_bin = Path(env["LIGHTRAG_SERVER_BIN"]).expanduser()
+
+    def _runtime_check(path: Path) -> dict[str, object]:
+        if not path.is_file():
+            return {"ok": False, "details": "missing"}
+        if not os.access(path, os.X_OK):
+            return {"ok": False, "details": f"not executable ({path})"}
+        return {"ok": True, "details": str(path)}
+
+    runtime = _runtime_check(engine_python)
+    server = _runtime_check(server_bin)
+    report = [
+        {
+            "name": "runtime",
+            "ok": runtime["ok"],
+            "details": runtime["details"],
+        },
+        {
+            "name": "server",
+            "ok": server["ok"],
+            "details": server["details"],
+        },
+    ]
+    for unit in _status_linux_units(env):
+        report.append(_service_status(unit))
+    report.append(_funnel_status(env))
+    return report
+
+
+def cmd_doctor(_: argparse.Namespace) -> None:
+    report = _doctor_report()
+    for item in report:
+        print(f"{item['name']}: {item['details']}")
+    if not all(bool(item["ok"]) for item in report):
+        raise SystemExit(1)
+
+
+def cmd_service(args: argparse.Namespace) -> None:
+    handlers = {
+        "status": cmd_service_status,
+        "restart": cmd_service_restart,
+        "logs": cmd_service_logs,
+    }
+    handlers[args.service_cmd](args)
+
+
+def cmd_service_status(args: argparse.Namespace) -> None:
+    units = [_normalize_service_name(args.name)] if getattr(args, "name", None) else _status_linux_units(global_env())
+    for unit in units:
+        status = _service_status(unit)
+        print(f"{unit}: {status['details']}")
+
+
+def cmd_service_restart(args: argparse.Namespace) -> None:
+    units = [_normalize_service_name(args.name)] if getattr(args, "name", None) else _manageable_linux_units(global_env())
+    for unit in units:
+        result = _systemctl_user("restart", unit)
+        if result.returncode != 0:
+            raise SystemExit(result.stderr.strip() or f"restart fallito: {unit}")
+        print(f"restarted {unit}")
+
+
+def cmd_service_logs(args: argparse.Namespace) -> None:
+    units = [_normalize_service_name(args.name)] if getattr(args, "name", None) else _manageable_linux_units(global_env())
+    for unit in units:
+        result = _journalctl_user("-n", "100", "--no-pager", "-u", unit)
+        if len(units) > 1:
+            print(f"== {unit} ==")
+        output = result.stdout.strip() or result.stderr.strip()
+        if output:
+            print(output)
+        if result.returncode != 0:
+            raise SystemExit(result.returncode)
+
+
+def cmd_service_install_units(_: argparse.Namespace) -> None:
+    installed = install_user_units(Path(__file__).resolve().parent.parent, Path.home(), global_env())
+    print(f"installed user units: {', '.join(path.name for path in installed)}")
+
+
 def port_pid(port: int) -> str | None:
     result = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True)
     return result.stdout.strip() or None
 
 
 def health(port: int) -> bool:
+    if requests is None:
+        return False
     try:
         return requests.get(f"http://127.0.0.1:{port}/health", timeout=2).ok
     except Exception:
@@ -98,6 +350,7 @@ def _kb_server_state(kb: dict) -> str:
     return "down"
 
 
+# Attempt every client removal and collect failures instead of stopping early.
 def _deregister_all_mcp(kb: dict) -> list[str]:
     mcp_name = f"lightrag-{kb['name']}"
     warnings: list[str] = []
@@ -112,6 +365,7 @@ def _deregister_all_mcp(kb: dict) -> list[str]:
     return warnings
 
 
+# Permit deletion only for the two recognized KB data directory locations.
 def _safe_kb_delete_target(kb: dict) -> Path:
     data_dir = Path(kb["data_dir"]).resolve()
     source_data_dir = (Path(kb["source_dir"]).resolve() / ".lightrag").resolve()
@@ -436,12 +690,73 @@ def cmd_mcp_rm(args: argparse.Namespace) -> None:
     sys.exit(rc)
 
 
+def cmd_sync_prepare(args: argparse.Namespace) -> None:
+    """Create a source-bound sync job and return its comparison snapshot."""
+    from storage.catalog import Catalog
+    from sync.server import prepare_sync
+
+    try:
+        if not find_kb(load_registry(global_env()), args.kb):
+            raise ValueError(f"KB '{args.kb}' non trovata")
+        with Catalog.open_for_kb(args.kb, KB_ROOT) as catalog:
+            result = prepare_sync(catalog, args.kb, args.source, args.mode, uuid.uuid4().hex)
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        raise SystemExit(1) from exc
+    print(json.dumps({"ok": True, **result}, ensure_ascii=False))
+
+
+def cmd_job_status(args: argparse.Namespace) -> None:
+    """Return the durable state of a job belonging to the requested KB."""
+    from storage.catalog import Catalog
+
+    try:
+        if not find_kb(load_registry(global_env()), args.kb):
+            raise ValueError("unknown KB")
+        with Catalog.open_for_kb(args.kb, KB_ROOT) as catalog:
+            while True:
+                job = catalog.get_job(args.job_id)
+                if not job or job.kb_id != args.kb:
+                    raise ValueError("unknown job")
+                if args.job_cmd != "wait" or job.stage in {"COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}:
+                    break
+                time.sleep(1)
+        ok = args.job_cmd != "wait" or job.stage == "COMPLETED"
+        print(json.dumps({"ok": ok, "job_id": job.job_id, "kb": job.kb_id, "source": job.source_id, "state": job.stage, **job.counters}, ensure_ascii=False))
+        if not ok:
+            raise SystemExit(1)
+    except (ValueError, OSError, RuntimeError) as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
+        raise SystemExit(1) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ragcli",
         description="CLI minimale per gestire KB LightRAG WebUI-first con runtime condiviso.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sync = sub.add_parser("sync", help="gestione sync remota")
+    sync_sub = sync.add_subparsers(dest="sync_cmd", required=True)
+    prepare = sync_sub.add_parser("prepare", help="prepara un job di sincronizzazione")
+    prepare.add_argument("--kb", required=True)
+    prepare.add_argument("--source", required=True)
+    prepare.add_argument("--mode", choices=("full", "partial"), required=True)
+    prepare.add_argument("--json", action="store_true")
+    prepare.set_defaults(func=cmd_sync_prepare)
+
+    job = sub.add_parser("job", help="stato dei job")
+    job_sub = job.add_subparsers(dest="job_cmd", required=True)
+    for name in ("status", "wait"):
+        status = job_sub.add_parser(name)
+        status.add_argument("job_id")
+        status.add_argument("--kb", required=True)
+        status.add_argument("--json", action="store_true")
+        status.set_defaults(func=cmd_job_status)
+
+    doctor = sub.add_parser("doctor", help="verifica runtime, config, servizi e publish")
+    doctor.set_defaults(func=cmd_doctor)
 
     add = sub.add_parser("add", help="crea una KB puntando a una cartella sorgente")
     add.add_argument("name")
@@ -533,6 +848,20 @@ def build_parser() -> argparse.ArgumentParser:
     move = sub.add_parser("move", help="sposta la data_dir tra source path e repo locale")
     move.add_argument("name")
     move.set_defaults(func=cmd_move)
+
+    service = sub.add_parser("service", help="gestione servizi Linux systemd --user")
+    service_sub = service.add_subparsers(dest="service_cmd", required=True)
+    service_status = service_sub.add_parser("status", help="mostra stato servizi")
+    service_status.add_argument("name", nargs="?")
+    service_status.set_defaults(func=cmd_service_status)
+    service_restart = service_sub.add_parser("restart", help="riavvia un servizio")
+    service_restart.add_argument("name", nargs="?")
+    service_restart.set_defaults(func=cmd_service_restart)
+    service_logs = service_sub.add_parser("logs", help="mostra log di un servizio")
+    service_logs.add_argument("name", nargs="?")
+    service_logs.set_defaults(func=cmd_service_logs)
+    service_install = service_sub.add_parser("install-units", help="installa le unit systemd --user del repo")
+    service_install.set_defaults(func=cmd_service_install_units)
 
     return parser
 

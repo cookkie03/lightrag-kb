@@ -10,6 +10,7 @@ kb
 # Python
 __pycache__/
 *.pyc
+.venv/
 .venv-mcp/
 .venv-engine/
 services/obsidian-mcp-oauth-shim/.venv/
@@ -28,3 +29,5 @@ services/obsidian-mcp-oauth-shim/logs/
 
 .serena
 .tokensave
+
+graphify-out/

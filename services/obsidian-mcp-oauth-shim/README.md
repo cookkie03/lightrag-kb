@@ -1,13 +1,12 @@
 # obsidian-mcp-oauth-shim
 
-Piccolo authorization server OAuth 2.1 (DCR + PKCE) che espone l'MCP del plugin
-Obsidian **"Local REST API with MCP"** (`https://127.0.0.1:27124/mcp/`) come
-Custom Connector remoto per claude.ai, tramite Tailscale Funnel.
+Piccolo authorization server OAuth 2.1 (DCR + PKCE) che espone un endpoint
+MCP LightRAG già pubblicato in locale come Custom Connector remoto per
+claude.ai, tramite Tailscale Funnel.
 
-Il plugin usa un unico bearer token statico che claude.ai non può configurare
-direttamente (i connector di claude.ai supportano solo OAuth). Questo shim fa
-da ponte: implementa un vero (minimo) authorization server, e fa da reverse
-proxy verso il plugin sostituendo il token OAuth con la vera API key.
+Lo shim resta necessario perché claude.ai parla con custom connector remoti via
+OAuth. Questo servizio mantiene discovery, DCR, authorize e token endpoint, poi
+fa da reverse proxy verso il backend `lightrag_mcp` locale.
 
 ## Componenti
 
@@ -20,27 +19,55 @@ proxy verso il plugin sostituendo il token OAuth con la vera API key.
 
 ## Configurazione (`.env`)
 
-File in `~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim/.env` (permessi `600`). Campi principali:
+File in `<repo>/services/obsidian-mcp-oauth-shim/.env` (permessi `600`). Campi principali:
 
 | Chiave | Significato |
 |---|---|
 | `ISSUER_URL` | URL pubblico dello shim (hostname Tailscale Funnel) |
-| `OBSIDIAN_MCP_URL` | Endpoint locale del plugin (default `https://127.0.0.1:27124`) |
-| `OBSIDIAN_PLUGIN_DATA_JSON` | Path al `data.json` del plugin — **fonte autoritativa** della API key, letta live ad ogni richiesta |
-| `OBSIDIAN_API_KEY` | Fallback usato solo se `OBSIDIAN_PLUGIN_DATA_JSON` non è raggiungibile — normalmente non serve toccarlo |
+| `SHIM_BIND_HOST` | Bind locale del processo uvicorn, normalmente `127.0.0.1` |
+| `SHIM_BIND_PORT` | Porta locale del processo uvicorn |
+| `LIGHTRAG_MCP_URL` | Endpoint locale del backend `lightrag_mcp` (default `http://127.0.0.1:8743/mcp`) |
+| `LIGHTRAG_MCP_VERIFY_SSL` | Verifica TLS del backend MCP locale; tipicamente `false` se il backend è su HTTP loopback |
 | `JWT_SECRET` | Auto-generato al primo avvio, firma gli access token |
 | `CONSENT_PASSCODE` | Auto-generato al primo avvio, richiesto nella pagina di consenso `/authorize` |
-
-**La API key non va copiata a mano**: `app/main.py` la legge in tempo reale
-da `.obsidian/plugins/obsidian-local-rest-api/data.json` nel vault (funzione
-`_current_obsidian_api_key()`), quindi segue automaticamente eventuali
-rigenerazioni del plugin (es. dopo sync da un altro device). `OBSIDIAN_API_KEY`
-in `.env` resta solo come fallback se quel file diventasse irraggiungibile.
 
 Il passcode di consenso attuale è in `.env` sotto `CONSENT_PASSCODE`. Ti servirà
 ogni volta che approvi un nuovo client (es. la prima connessione di claude.ai).
 
+Il backend `lightrag_mcp` deve essere già raggiungibile in locale su
+`LIGHTRAG_MCP_URL`; lo shim non implementa MCP, si occupa solo dello strato
+OAuth e del proxy.
+
+## Linux service model
+
+Su Linux lo shim gira sotto `systemd --user`, in bind locale su
+`127.0.0.1:${SHIM_BIND_PORT}`. Il bootstrap del repo installa l'unità e poi
+pubblica verso internet con:
+
+```bash
+tailscale serve --bg 8443 http://127.0.0.1:8420
+tailscale funnel --bg 8443
+```
+
+Controlli utili:
+
+```bash
+ragcli doctor
+ragcli service status
+ragcli service logs obsidian-mcp-oauth-shim
+```
+
 ## Avviare / fermare il servizio
+
+Su Linux:
+
+```bash
+systemctl --user status obsidian-mcp-oauth-shim.service
+systemctl --user restart obsidian-mcp-oauth-shim.service
+journalctl --user -u obsidian-mcp-oauth-shim.service -n 100 --no-pager
+```
+
+Su macOS:
 
 Gira come LaunchAgent (`com.luca.obsidianmcpoauthshim`), già installato e avviato:
 
@@ -93,8 +120,8 @@ ricrealo sempre da zero nella nuova posizione:
 ```bash
 cd ~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim
 python3 -m venv .venv
-.venv/bin/pip install --upgrade pip
-.venv/bin/pip install -r requirements.txt
+../../.venv/bin/pip install --upgrade pip
+../../.venv/bin/pip install -r requirements.txt
 # poi aggiorna i path nel plist e bootstrap
 ```
 
@@ -112,7 +139,7 @@ tailscale funnel status         # verifica configurazione attiva
 tailscale funnel --https=443 off   # per disattivare l'esposizione pubblica
 ```
 
-**Nota**: Funnel espone lo shim (non la porta 27124 del plugin) a chiunque su
+**Nota**: Funnel espone lo shim (non il backend MCP locale diretto) a chiunque su
 internet conosca l'URL. La superficie protetta è: passcode sulla pagina di
 consenso + PKCE obbligatorio + JWT firmato. Non condividere `CONSENT_PASSCODE`
 né il contenuto di `.env`.
@@ -121,8 +148,8 @@ né il contenuto di `.env`.
 
 ```bash
 cd ~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim
-.venv/bin/python manage.py rotate-jwt-secret   # invalida tutti gli access token in circolazione
-.venv/bin/python manage.py rotate-passcode     # nuovo passcode per /authorize
+../../.venv/bin/python manage.py rotate-jwt-secret   # invalida tutti gli access token in circolazione
+../../.venv/bin/python manage.py rotate-passcode     # nuovo passcode per /authorize
 ```
 
 Dopo la rotazione, riavvia il servizio (vedi sopra).
@@ -131,8 +158,8 @@ Dopo la rotazione, riavvia il servizio (vedi sopra).
 
 ```bash
 cd ~/Documents/lightrag-kb/services/obsidian-mcp-oauth-shim
-.venv/bin/python manage.py list-clients
-.venv/bin/python manage.py revoke-client <client_id>
+../../.venv/bin/python manage.py list-clients
+../../.venv/bin/python manage.py revoke-client <client_id>
 ```
 
 ## URL da inserire in claude.ai

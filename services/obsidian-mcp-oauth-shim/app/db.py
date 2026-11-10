@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 """
 
 
+# Gestisce la connessione SQLite, confermando le operazioni riuscite e chiudendola sempre.
 @contextmanager
 def get_conn():
     conn = sqlite3.connect(config.DB_PATH, timeout=5)
@@ -44,11 +45,13 @@ def get_conn():
         conn.close()
 
 
+# Inizializza le tabelle necessarie se non esistono.
 def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
 
 
+# Registra un client e serializza le URI di redirect.
 def create_client(client_id: str, client_name: str, redirect_uris: list[str]):
     with get_conn() as conn:
         conn.execute(
@@ -57,6 +60,7 @@ def create_client(client_id: str, client_name: str, redirect_uris: list[str]):
         )
 
 
+# Recupera un client decodificando le URI registrate.
 def get_client(client_id: str):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM clients WHERE client_id = ?", (client_id,)).fetchone()
@@ -70,6 +74,7 @@ def get_client(client_id: str):
         }
 
 
+# Elenca i client dal più recente, decodificando le URI registrate.
 def list_clients():
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM clients ORDER BY created_at DESC").fetchall()
@@ -84,6 +89,7 @@ def list_clients():
         ]
 
 
+# Elimina il client insieme ai codici e ai refresh token associati.
 def delete_client(client_id: str):
     with get_conn() as conn:
         conn.execute("DELETE FROM clients WHERE client_id = ?", (client_id,))
@@ -91,6 +97,7 @@ def delete_client(client_id: str):
         conn.execute("DELETE FROM refresh_tokens WHERE client_id = ?", (client_id,))
 
 
+# Conserva un codice con scadenza e challenge PKCE.
 def store_auth_code(code: str, client_id: str, redirect_uri: str, code_challenge: str, state: str | None):
     with get_conn() as conn:
         conn.execute(
@@ -100,6 +107,7 @@ def store_auth_code(code: str, client_id: str, redirect_uri: str, code_challenge
         )
 
 
+# Restituisce un codice valido e lo segna come usato.
 def consume_auth_code(code: str):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM auth_codes WHERE code = ?", (code,)).fetchone()
@@ -111,6 +119,7 @@ def consume_auth_code(code: str):
         return dict(row)
 
 
+# Conserva il digest di un refresh token con la sua scadenza.
 def store_refresh_token(token_hash: str, client_id: str):
     with get_conn() as conn:
         conn.execute(
@@ -120,22 +129,26 @@ def store_refresh_token(token_hash: str, client_id: str):
         )
 
 
+# Recupera un refresh token tramite digest.
 def get_refresh_token(token_hash: str):
     with get_conn() as conn:
         row = conn.execute("SELECT * FROM refresh_tokens WHERE token_hash = ?", (token_hash,)).fetchone()
         return dict(row) if row else None
 
 
+# Segna un refresh token come revocato.
 def revoke_refresh_token(token_hash: str):
     with get_conn() as conn:
         conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE token_hash = ?", (token_hash,))
 
 
+# Revoca tutti i refresh token associati al client.
 def revoke_all_refresh_tokens_for_client(client_id: str):
     with get_conn() as conn:
         conn.execute("UPDATE refresh_tokens SET revoked = 1 WHERE client_id = ?", (client_id,))
 
 
+# Elimina i codici scaduti e i token non revocati scaduti da oltre un giorno.
 def purge_expired():
     now = int(time.time())
     with get_conn() as conn:

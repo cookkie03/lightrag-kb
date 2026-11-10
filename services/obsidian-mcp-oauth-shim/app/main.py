@@ -16,28 +16,31 @@ log = logging.getLogger("obsidian-mcp-oauth-shim")
 HOP_BY_HOP = {"connection", "content-length", "transfer-encoding", "keep-alive", "upgrade"}
 
 
+# Inizializza archivio e client HTTP condiviso, chiudendo il client allo spegnimento.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()
     db.purge_expired()
-    app.state.http_client = httpx.AsyncClient(verify=config.OBSIDIAN_VERIFY_SSL, timeout=None)
-    log.info("shim avviato, issuer=%s, obsidian_mcp=%s", config.ISSUER_URL, config.OBSIDIAN_MCP_URL)
+    app.state.http_client = httpx.AsyncClient(verify=config.LIGHTRAG_MCP_VERIFY_SSL, timeout=None)
+    log.info("shim avviato, issuer=%s, lightrag_mcp=%s", config.ISSUER_URL, config.LIGHTRAG_MCP_URL)
     yield
     await app.state.http_client.aclose()
 
 
-app = FastAPI(title="Obsidian MCP OAuth Shim", lifespan=lifespan)
+app = FastAPI(title="LightRAG MCP OAuth Shim", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------
 # Discovery
 # --------------------------------------------------------------------------
 
+# Espone lo stato essenziale del servizio.
 @app.get("/")
 async def root():
-    return {"status": "ok", "service": "obsidian-mcp-oauth-shim"}
+    return {"status": "ok", "service": "lightrag-mcp-oauth-shim"}
 
 
+# Pubblica i metadati OAuth del server di autorizzazione.
 @app.get("/.well-known/oauth-authorization-server")
 async def oauth_authorization_server():
     return JSONResponse({
@@ -52,6 +55,7 @@ async def oauth_authorization_server():
     })
 
 
+# Pubblica i metadati della risorsa MCP protetta.
 @app.get("/.well-known/oauth-protected-resource")
 async def oauth_protected_resource():
     return JSONResponse({
@@ -64,6 +68,7 @@ async def oauth_protected_resource():
 # Dynamic Client Registration (RFC 7591)
 # --------------------------------------------------------------------------
 
+# Registra un client OAuth pubblico con le URI di redirect fornite.
 @app.post("/register")
 async def register(request: Request):
     body = await request.json()
@@ -93,6 +98,7 @@ async def register(request: Request):
 # Authorize (consent screen)
 # --------------------------------------------------------------------------
 
+# Genera la pagina di consenso facendo escape dei valori inseriti.
 def _consent_page(*, client_id, redirect_uri, state, code_challenge, code_challenge_method,
                    response_type, error=None):
     esc = html.escape
@@ -101,7 +107,7 @@ def _consent_page(*, client_id, redirect_uri, state, code_challenge, code_challe
 <html lang="it">
 <head>
 <meta charset="utf-8">
-<title>Autorizza accesso a Obsidian MCP</title>
+<title>Autorizza accesso a LightRAG MCP</title>
 <style>
   body {{ font-family: -apple-system, sans-serif; max-width: 420px; margin: 80px auto; padding: 0 20px; }}
   .box {{ border: 1px solid #ddd; border-radius: 12px; padding: 24px; }}
@@ -115,8 +121,8 @@ def _consent_page(*, client_id, redirect_uri, state, code_challenge, code_challe
 </head>
 <body>
   <div class="box">
-    <h2>Autorizza accesso al tuo Obsidian</h2>
-    <p>Un client sta richiedendo accesso all'MCP del tuo vault Obsidian.</p>
+    <h2>Autorizza accesso al tuo LightRAG MCP</h2>
+    <p>Un client sta richiedendo accesso al tuo endpoint MCP LightRAG.</p>
     <p>Client ID: <code>{esc(client_id)}</code></p>
     {error_html}
     <form method="POST" action="/authorize">
@@ -135,6 +141,7 @@ def _consent_page(*, client_id, redirect_uri, state, code_challenge, code_challe
 </html>"""
 
 
+# Valida la richiesta OAuth e mostra la pagina di consenso.
 @app.get("/authorize")
 async def authorize_get(
     response_type: str,
@@ -162,6 +169,7 @@ async def authorize_get(
     ))
 
 
+# Gestisce il consenso e rilascia un codice dopo la verifica del passcode.
 @app.post("/authorize")
 async def authorize_post(
     client_id: str = Form(...),
@@ -199,6 +207,7 @@ async def authorize_post(
 # Token endpoint
 # --------------------------------------------------------------------------
 
+# Costruisce una risposta di errore OAuth con descrizione opzionale.
 def _oauth_error(error: str, description: str = "", status_code: int = 400):
     body = {"error": error}
     if description:
@@ -206,6 +215,7 @@ def _oauth_error(error: str, description: str = "", status_code: int = 400):
     return JSONResponse(body, status_code=status_code)
 
 
+# Scambia codici PKCE o refresh token con nuove credenziali.
 @app.post("/token")
 async def token(request: Request):
     form = await request.form()
@@ -273,17 +283,8 @@ async def token(request: Request):
 # MCP proxy
 # --------------------------------------------------------------------------
 
-def _current_obsidian_api_key() -> str:
-    try:
-        with open(config.OBSIDIAN_PLUGIN_DATA_JSON) as f:
-            key = json.load(f).get("apiKey")
-        if key:
-            return key
-    except (OSError, json.JSONDecodeError, KeyError):
-        pass
-    return config.OBSIDIAN_API_KEY
 
-
+# Richiede un bearer token indicando i metadati della risorsa protetta.
 def _unauthorized():
     return Response(
         status_code=401,
@@ -291,6 +292,7 @@ def _unauthorized():
     )
 
 
+# Verifica il bearer token e inoltra la richiesta MCP senza header hop-by-hop.
 async def _proxy(request: Request, path: str):
     auth_header = request.headers.get("authorization", "")
     if not auth_header.lower().startswith("bearer "):
@@ -300,12 +302,11 @@ async def _proxy(request: Request, path: str):
     if not claims:
         return _unauthorized()
 
-    target_url = f"{config.OBSIDIAN_MCP_URL}/mcp/{path}"
+    target_url = config.LIGHTRAG_MCP_URL if not path else f"{config.LIGHTRAG_MCP_URL}/{path}"
     forward_headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in ({"host", "authorization"} | HOP_BY_HOP)
     }
-    forward_headers["authorization"] = f"Bearer {_current_obsidian_api_key()}"
 
     body = await request.body()
     client: httpx.AsyncClient = request.app.state.http_client
@@ -317,6 +318,7 @@ async def _proxy(request: Request, path: str):
     )
     upstream = await client.send(upstream_req, stream=True)
 
+    # Trasmette i byte upstream senza ricodificarli e chiude la risposta al termine.
     async def gen():
         async for chunk in upstream.aiter_raw():
             yield chunk
@@ -326,11 +328,13 @@ async def _proxy(request: Request, path: str):
     return StreamingResponse(gen(), status_code=upstream.status_code, headers=resp_headers)
 
 
+# Inoltra le richieste alla radice MCP tramite il proxy autenticato.
 @app.api_route("/mcp", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def mcp_proxy_root(request: Request):
     return await _proxy(request, "")
 
 
+# Inoltra i percorsi MCP tramite il proxy autenticato.
 @app.api_route("/mcp/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def mcp_proxy_path(path: str, request: Request):
     return await _proxy(request, path)

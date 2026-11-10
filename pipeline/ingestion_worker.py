@@ -81,6 +81,7 @@ class StagedAction:
     mtime_ns: int = 0
     staged_filename: str | None = None
 
+    # Serialize the action and its staging metadata for the manifest.
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -100,6 +101,9 @@ class StagedJobManifest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StagedJobManifest:
+        """Reject ambiguous scan status rather than treating it as complete."""
+        if type(data.get("scan_complete")) is not bool or type(data.get("scan_errors")) is not int or data["scan_errors"] < 0:
+            raise ValueError("invalid scan status")
         raw_actions = data.get("actions") or data.get("files") or []
         parsed_actions = [
             StagedAction(
@@ -124,6 +128,7 @@ class StagedJobManifest:
             actions=parsed_actions,
         )
 
+    # Load JSON through the same scan-status validation as in-memory manifests.
     @classmethod
     def load_from_file(cls, path: Path | str) -> StagedJobManifest:
         p = Path(path)
@@ -134,6 +139,7 @@ class StagedJobManifest:
 class IngestionWorker:
     """Process staged sync and push jobs against the JSON catalog and LightRAG."""
 
+    # Bind the catalog, indexer and staging configuration to the worker.
     def __init__(
         self,
         catalog: Catalog,
@@ -159,7 +165,7 @@ class IngestionWorker:
         Checks if any other job for this Knowledge Base is currently in an active stage.
         """
         active_stages = {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING"}
-        jobs = self.catalog.list_jobs(kb_id=kb_id, limit=50)
+        jobs = self.catalog.list_jobs(kb_id=kb_id, limit=None)
         for j in jobs:
             if j.job_id != current_job_id and j.stage in active_stages:
                 raise JobLockedError(
@@ -170,7 +176,7 @@ class IngestionWorker:
     def acquire_source_lock(self, source_id: str, current_job_id: str) -> None:
         """Preserved for backward-compatibility; checks active jobs for source (§4)."""
         active_stages = {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING"}
-        jobs = self.catalog.list_jobs(source_id=source_id, limit=20)
+        jobs = self.catalog.list_jobs(source_id=source_id, limit=None)
         for j in jobs:
             if j.job_id != current_job_id and j.stage in active_stages:
                 raise JobLockedError(
@@ -196,7 +202,9 @@ class IngestionWorker:
             return True, None
 
         source = self.catalog.get_source(manifest.source_id)
-        if source is not None and source.deletion_policy != "guarded":
+        if source is None:
+            return False, f"Sorgente sconosciuta: {manifest.source_id}."
+        if source.deletion_policy != "guarded":
             return False, f"Policy di cancellazione disabilitata ('{source.deletion_policy}') per sorgente {manifest.source_id}."
 
         # Guard 1: Push / partial scan cannot delete
@@ -214,7 +222,7 @@ class IngestionWorker:
 
         if total_active > 0:
             pct = (del_count / total_active) * 100
-            if del_count > 100 or (total_active >= 5 and (del_count / total_active) > 0.20):
+            if del_count > 100 or (del_count / total_active) > 0.20:
                 return False, (
                     f"Superata soglia di sicurezza delezioni: {del_count}/{total_active} file "
                     f"({pct:.1f}% > 20% o >100). Impostato stato NEEDS_REVIEW."
@@ -241,33 +249,53 @@ class IngestionWorker:
         if job is None:
             raise IngestionWorkerError(f"Job non trovato nel catalogo: {job_id}")
 
+        # A job ID is a single staging directory name, never a relative path.
+        if not job_id or job_id in {".", ".."} or Path(job_id).name != job_id or "\\" in job_id:
+            return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Invalid job identifier")
+
         if job.stage == "COMPLETED":
             logger.info("Job '%s' già completato (idempotente).", job_id)
             return job
 
-        # Load manifest if not passed directly
+        # Read staged requests before locking; admit them under the writer lock.
+        raw_manifest = None
         if manifest is None:
             if not self.staging_dir:
                 raise IngestionWorkerError(f"Nessuna directory di staging configurata per il job {job_id}")
             manifest_file = self.staging_dir / job_id / "manifest.json"
             if not manifest_file.exists():
                 raise IngestionWorkerError(f"File di manifest mancante in staging: {manifest_file}")
-            manifest = StagedJobManifest.load_from_file(manifest_file)
+            try:
+                validate_safe_relative_path(f"{job_id}/manifest.json", base_dir=self.staging_dir, allow_symlinks=False)
+                raw_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError, SafePathError) as exc:
+                return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=str(exc))
 
-        if (manifest.job_id, manifest.kb_id, manifest.source_id) != (job.job_id, job.kb_id, job.source_id):
+        if manifest is not None and (manifest.job_id, manifest.kb_id, manifest.source_id) != (job.job_id, job.kb_id, job.source_id):
             return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Manifest identity does not match job")
 
-        source_id = manifest.source_id
-        kb_id = manifest.kb_id
+        source_id = job.source_id
+        kb_id = job.kb_id
 
         # Acquire KB-level single-writer lock (§5: 'un solo writer per KB')
         with self.kb_lock:
+            # Another worker may have completed this job while we waited.
+            job = self.catalog.get_job(job_id)
+            if job.stage == "COMPLETED":
+                return job
             # Step 1: Verify catalog locks for KB and source
             self.acquire_kb_lock(kb_id, job_id)
             self.acquire_source_lock(source_id, job_id)
 
             # Step 1.5: Recover any pending checkpoints left from previous crashes (§5)
             self.indexer.recover_pending_checkpoints()
+
+            if manifest is None:
+                from sync.server import admit_manifest
+                try:
+                    manifest = admit_manifest(self.catalog, job_id, raw_manifest, self.staging_dir / job_id / "incoming")
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=str(exc))
 
             # Step 2: Validate safe sandboxed paths across all manifest actions (§11 #10)
             for act in manifest.actions:
@@ -328,8 +356,12 @@ class IngestionWorker:
             source_origin = source_rec.origin_folder if source_rec else ""
             source_host = source_rec.origin_host if source_rec else ""
 
-            # Step 5: Process actions
-            for item in manifest.actions:
+            # Process deletes last and only after every other action succeeds.
+            # A failed upload or indexing operation must never imply a deletion.
+            actions = sorted(manifest.actions, key=lambda item: item.action == "delete")
+            for item in actions:
+                if item.action == "delete" and counters["failed"]:
+                    continue
                 rel_path = item.relative_path
                 source_uri = f"{source_host}:{source_origin}/{rel_path}".lstrip(":")
 
@@ -392,11 +424,16 @@ class IngestionWorker:
                         source_uri=source_uri,
                     )
 
+                    # Keep modified artifacts versioned so recovery can still read the old file.
+                    artifact_rel_path = rel_path
+                    if item.action == "modify":
+                        artifact_rel_path = f".updates/{job_id}/{rel_path}"
+
                     # Persist derived markdown and JSON sidecar (§7)
                     md_path, sidecar_path = save_derived_artifacts(
                         parsed=parsed,
                         derived_dir=self.derived_dir,
-                        relative_path=rel_path,
+                        relative_path=artifact_rel_path,
                         source_uri=source_uri,
                     )
 
@@ -468,7 +505,7 @@ class IngestionWorker:
                 except OSError as cleanup_err:
                     logger.debug("Impossibile rimuovere file staged %s: %s", v_file, cleanup_err)
 
-            if final_stage == "COMPLETED" and manifest.mode == "full_folder" and manifest.scan_complete:
+            if final_stage == "COMPLETED" and manifest.mode == "full_folder" and manifest.scan_complete and manifest.scan_errors == 0:
                 scan_id = manifest.scan_id or job_id
                 self.catalog.update_source_scan(source_id, scan_id)
 

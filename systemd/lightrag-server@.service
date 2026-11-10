@@ -1,0 +1,15 @@
+[Unit]
+Description=LightRAG server for KB %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_ROOT__
+EnvironmentFile=%h/.config/lightrag-kb/%i.env
+ExecStart=__LIGHTRAG_SERVER_BIN__ --host 127.0.0.1 --port ${PORT} --input-dir ${INPUT_DIR} --working-dir ${WORKING_DIR}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

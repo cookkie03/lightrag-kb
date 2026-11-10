@@ -1,0 +1,16 @@
+[Unit]
+Description=LightRAG MCP server for KB %i
+After=network-online.target lightrag-server@%i.service
+Wants=network-online.target
+Requires=lightrag-server@%i.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/lightrag-kb/%i.env
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/mcp/lightrag_mcp.py --kb %i --transport streamable-http --host ${MCP_BIND_HOST} --port ${MCP_BIND_PORT} --path ${MCP_PATH}
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -17,6 +17,7 @@ class JsonStore:
         """Keep the snapshot and its lock in the same private KB directory."""
         self.path = Path(path)
 
+    # Keep the lock across the caller's transaction and commit only after a normal exit.
     @contextmanager
     def transaction(self):
         """Commit only on success; reject corrupt or unknown snapshots unchanged."""

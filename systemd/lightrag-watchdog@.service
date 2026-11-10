@@ -1,0 +1,13 @@
+[Unit]
+Description=Watchdog for LightRAG server %i
+After=lightrag-server@%i.service
+Requires=lightrag-server@%i.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -lc 'while :; do systemctl --user is-active --quiet lightrag-server@%i.service || systemctl --user restart lightrag-server@%i.service; sleep 30; done'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

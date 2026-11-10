@@ -135,9 +135,11 @@ class PersistentCheckpoint:
     created_at: str
     updated_at: str
 
+    # Serialize the checkpoint for persistent recovery.
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    # Reconstruct a checkpoint from its persisted fields.
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PersistentCheckpoint:
         return cls(**data)
@@ -155,6 +157,7 @@ class KBWriterLock:
     Supports re-entrant acquisition within the same thread.
     """
 
+    # Keep thread ownership and nesting separate from the process-wide file lock.
     def __init__(self, lock_path: Path | str, kb_id: str = "") -> None:
         self.lock_path = Path(lock_path).resolve()
         self.kb_id = kb_id
@@ -163,6 +166,7 @@ class KBWriterLock:
         self._owner_thread: int | None = None
         self._local_lock = threading.Lock()
 
+    # Acquire the KB lock, allowing re-entry by its owning thread.
     def acquire(self, timeout: float = 0.0, poll_interval: float = 0.05) -> bool:
         current_thread = threading.get_ident()
         with self._local_lock:
@@ -194,6 +198,7 @@ class KBWriterLock:
                     ) from exc
                 time.sleep(poll_interval)
 
+    # Release the file lock only when the owner's nesting depth reaches zero.
     def release(self) -> None:
         current_thread = threading.get_ident()
         with self._local_lock:
@@ -211,10 +216,12 @@ class KBWriterLock:
                     self._fd = None
                     self._owner_thread = None
 
+    # Acquire the writer lock for a scoped operation.
     def __enter__(self) -> KBWriterLock:
         self.acquire()
         return self
 
+    # Balance scoped acquisition even when the operation raises.
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.release()
 
@@ -227,6 +234,7 @@ class KBWriterLock:
 class LightRAGClient:
     """HTTP client interacting with per-KB LightRAG server on localhost."""
 
+    # Configure the per-KB endpoint and reusable HTTP session.
     def __init__(
         self,
         port: int,
@@ -261,6 +269,7 @@ class LightRAGClient:
         docs: list[dict[str, Any]] = []
         try:
             page = 1
+            # Accumulate complete pages until the server returns a short or empty page.
             while True:
                 resp = self.session.post(
                     f"{self.base_url}/documents/paginated",
@@ -342,6 +351,7 @@ class LightRAGClient:
         if not text.strip():
             return {"status": "empty", "file_source": file_source}
 
+        # Retry bounded transient failures; duplicate claims require server verification.
         for attempt in range(1, retries + 2):
             try:
                 resp = self.session.post(
@@ -517,6 +527,7 @@ class LightRAGClient:
 class ProtectedIndexer:
     """Coordinates Catalog, LightRAGClient, and derived storage with recovery guards (§5)."""
 
+    # Prepare derived storage, checkpoint storage and the per-KB writer lock.
     def __init__(
         self,
         catalog: Catalog,
@@ -534,9 +545,11 @@ class ProtectedIndexer:
         self.kb_id = kb_id
         self.writer_lock = writer_lock or KBWriterLock(self.derived_dir / ".kb_writer.lock", kb_id=kb_id)
 
+    # Map a checkpoint identifier to its on-disk record.
     def _checkpoint_path(self, checkpoint_id: str) -> Path:
         return self.checkpoints_dir / f"chk_{checkpoint_id}.json"
 
+    # Replace the checkpoint atomically after updating its timestamp.
     def _save_checkpoint(self, checkpoint: PersistentCheckpoint) -> None:
         checkpoint.updated_at = utc_now_iso()
         chk_path = self._checkpoint_path(checkpoint.checkpoint_id)
@@ -544,10 +557,12 @@ class ProtectedIndexer:
         tmp_path.write_text(json.dumps(checkpoint.to_dict(), indent=2), encoding="utf-8")
         tmp_path.replace(chk_path)
 
+    # Persist the recovery stage before the corresponding mutation.
     def _update_checkpoint_stage(self, checkpoint: PersistentCheckpoint, stage: str) -> None:
         checkpoint.stage = stage
         self._save_checkpoint(checkpoint)
 
+    # Best-effort cleanup after completion or successful recovery.
     def _remove_checkpoint(self, checkpoint: PersistentCheckpoint) -> None:
         chk_path = self._checkpoint_path(checkpoint.checkpoint_id)
         try:
@@ -565,6 +580,7 @@ class ProtectedIndexer:
         if not self.checkpoints_dir.exists():
             return recovered
 
+        # Only stages that may have changed the index need restoration; READY is untouched.
         for chk_path in sorted(self.checkpoints_dir.glob("chk_*.json")):
             try:
                 data = json.loads(chk_path.read_text(encoding="utf-8"))

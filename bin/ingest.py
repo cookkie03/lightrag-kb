@@ -160,6 +160,15 @@ def _insert_priority(category: str) -> tuple[int, str]:
     }.get(category, (4, category))
 
 
+def _ordered_categories(plan: list[dict]) -> list[str]:
+    categories = {
+        item["category"]
+        for item in plan
+        if item["needs_render"] or item["needs_insert"]
+    }
+    return sorted(categories, key=_insert_priority)
+
+
 def _insert_content(item: dict, data_dir: Path) -> str:
     content = item.get("content")
     if isinstance(content, str):
@@ -207,6 +216,81 @@ def _docling_probe_text(path: Path, py: str, timeout: int) -> str:
         return ""
 
 
+def _env_flag(env: dict[str, str], key: str, default: str = "1") -> bool:
+    return env.get(key, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _docling_platform(env: dict[str, str]) -> str:
+    configured = env.get("DOCLING_PLATFORM", env.get("DEPLOY_PLATFORM", "auto")).strip().lower()
+    if configured in {"darwin", "macos"}:
+        configured = "mac"
+    if configured in {"linux", "mac"}:
+        return configured
+    return "mac" if sys.platform == "darwin" else "linux"
+
+
+def _docling_ocr_engine(env: dict[str, str]) -> str:
+    engine = env.get("DOCLING_OCR_ENGINE", "auto").strip().lower()
+    if engine != "auto":
+        return engine
+    return "ocrmac" if _docling_platform(env) == "mac" else "easyocr"
+
+
+def _docling_asr_engine(env: dict[str, str]) -> str:
+    engine = env.get("DOCLING_ASR_ENGINE", "auto").strip().lower()
+    if engine != "auto":
+        return engine
+    return "whisper_turbo_mlx" if _docling_platform(env) == "mac" else "whisper_turbo_native"
+
+
+def _docling_accelerator_device(env: dict[str, str]) -> str:
+    configured = env.get("DOCLING_ACCELERATOR", "auto").strip().lower()
+    if configured == "auto":
+        return "MPS" if _docling_platform(env) == "mac" else "CPU"
+    if configured == "cpu":
+        return "CPU"
+    if configured == "mps":
+        return "MPS"
+    if configured == "cuda":
+        return "CUDA"
+    raise RuntimeError(f"DOCLING_ACCELERATOR non supportato: {configured}")
+
+
+def _docling_visual_options_code(
+    env: dict[str, str], force_full_page: bool, langs: list[str], locales: list[str]
+) -> tuple[str, str]:
+    engine = _docling_ocr_engine(env)
+    if engine == "ocrmac":
+        return (
+            "OcrMacOptions",
+            f"OcrMacOptions(lang={locales!r}, recognition='accurate', force_full_page_ocr={force_full_page!r})",
+        )
+    if engine == "easyocr":
+        return (
+            "EasyOcrOptions",
+            f"EasyOcrOptions(lang={langs!r}, force_full_page_ocr={force_full_page!r})",
+        )
+    if engine == "rapidocr":
+        return (
+            "RapidOcrOptions",
+            f"RapidOcrOptions(lang={langs!r}, force_full_page_ocr={force_full_page!r})",
+        )
+    raise RuntimeError(f"DOCLING_OCR_ENGINE non supportato: {engine}")
+
+
+def _docling_asr_model_symbol(env: dict[str, str]) -> str:
+    mapping = {
+        "whisper_turbo": "WHISPER_TURBO",
+        "whisper_turbo_native": "WHISPER_TURBO_NATIVE",
+        "whisper_turbo_mlx": "WHISPER_TURBO_MLX",
+        "whisper_s2t": "WHISPER_SMALL_S2T",
+    }
+    engine = _docling_asr_engine(env)
+    if engine not in mapping:
+        raise RuntimeError(f"DOCLING_ASR_ENGINE non supportato: {engine}")
+    return mapping[engine]
+
+
 def render_docling_visual(path: Path, env: dict[str, str]) -> str:
     py = env["DOCLING_PYTHON"]
     langs = [item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()]
@@ -215,22 +299,36 @@ def render_docling_visual(path: Path, env: dict[str, str]) -> str:
     force_full_page = path.suffix.lower() in IMAGE_EXT or _looks_garbled(
         _docling_probe_text(path, py, min(timeout, 120))
     )
+    option_class, option_expr = _docling_visual_options_code(env, force_full_page, langs, locales)
+    do_tables = _env_flag(env, "DOCLING_ENABLE_TABLES")
+    do_formula = _env_flag(env, "DOCLING_ENABLE_FORMULA_ENRICHMENT")
+    do_code = _env_flag(env, "DOCLING_ENABLE_CODE_ENRICHMENT")
+    image_scale = float(env.get("DOCLING_IMAGE_SCALE", "2.0"))
+
     def _code(accelerator_device: str) -> str:
+        pipeline_imports = f"{option_class}, PdfPipelineOptions"
+        table_setup = ""
+        if do_tables:
+            pipeline_imports += ", TableFormerMode, TableStructureOptions"
+            table_setup = (
+                "opts.table_structure_options = "
+                "TableStructureOptions(do_cell_matching=True, mode=TableFormerMode.ACCURATE)\n"
+            )
         return (
             "import sys\n"
             "from pathlib import Path as _P\n"
             "from docling.datamodel.base_models import InputFormat\n"
             "from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions\n"
-            "from docling.datamodel.pipeline_options import OcrMacOptions, PdfPipelineOptions, TableFormerMode, TableStructureOptions\n"
+            f"from docling.datamodel.pipeline_options import {pipeline_imports}\n"
             "from docling.document_converter import DocumentConverter, PdfFormatOption\n"
             "opts = PdfPipelineOptions()\n"
             "opts.do_ocr = True\n"
-            "opts.do_table_structure = True\n"
-            "opts.table_structure_options = TableStructureOptions(do_cell_matching=True, mode=TableFormerMode.ACCURATE)\n"
-            f"opts.ocr_options = OcrMacOptions(lang={locales!r}, recognition='accurate', force_full_page_ocr={force_full_page!r})\n"
-            "opts.images_scale = 2.0\n"
-            "opts.do_formula_enrichment = True\n"
-            "opts.do_code_enrichment = True\n"
+            f"opts.do_table_structure = {do_tables!r}\n"
+            f"{table_setup}"
+            f"opts.ocr_options = {option_expr}\n"
+            f"opts.images_scale = {image_scale!r}\n"
+            f"opts.do_formula_enrichment = {do_formula!r}\n"
+            f"opts.do_code_enrichment = {do_code!r}\n"
             f"opts.accelerator_options = AcceleratorOptions(device=AcceleratorDevice.{accelerator_device}, num_threads=8)\n"
             "format_options = {InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}\n"
             "if hasattr(InputFormat, 'IMAGE'):\n"
@@ -244,10 +342,11 @@ def render_docling_visual(path: Path, env: dict[str, str]) -> str:
             "sys.stdout.write(doc.export_to_markdown())\n"
         )
 
+    accelerator_device = _docling_accelerator_device(env)
     try:
-        return _run_docling(py, _code("MPS"), timeout, f"Docling visual su {path.name}")
+        return _run_docling(py, _code(accelerator_device), timeout, f"Docling visual su {path.name}")
     except Exception as exc:
-        if not _is_mps_unsupported(exc):
+        if accelerator_device != "MPS" or not _is_mps_unsupported(exc):
             raise
         print(f"    ⚠ Docling su {path.name}: MPS non supportato da questo modello, fallback a CPU")
         return _run_docling(py, _code("CPU"), timeout, f"Docling visual (CPU fallback) su {path.name}")
@@ -272,6 +371,7 @@ def render_docling_audio(path: Path, env: dict[str, str]) -> str:
     py = env["DOCLING_PYTHON"]
     timeout = int(env.get("DOCLING_TIMEOUT", "3600"))
     language = next((item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()), "en")
+    asr_model_symbol = _docling_asr_model_symbol(env)
     code = (
         "import sys\n"
         "from pathlib import Path as _P\n"
@@ -280,7 +380,7 @@ def render_docling_audio(path: Path, env: dict[str, str]) -> str:
         "from docling.datamodel.pipeline_options import AsrPipelineOptions\n"
         "from docling.document_converter import AudioFormatOption, DocumentConverter\n"
         "from docling.pipeline.asr_pipeline import AsrPipeline\n"
-        f"asr_options = asr_model_specs.WHISPER_TURBO_MLX.model_copy(update={{'language': {language!r}}})\n"
+        f"asr_options = asr_model_specs.{asr_model_symbol}.model_copy(update={{'language': {language!r}}})\n"
         "pipeline_options = AsrPipelineOptions(asr_options=asr_options)\n"
         "format_options = {InputFormat.AUDIO: AudioFormatOption(pipeline_cls=AsrPipeline, pipeline_options=pipeline_options)}\n"
         "if hasattr(InputFormat, 'VIDEO'):\n"
@@ -296,6 +396,7 @@ def render_docling_audio(path: Path, env: dict[str, str]) -> str:
     return _run_docling(py, code, timeout, f"Docling audio/video su {path.name}")
 
 
+# Accept the document-list shapes returned by different server versions.
 def _document_rows(data: object) -> list[dict]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -307,6 +408,7 @@ def _document_rows(data: object) -> list[dict]:
     return []
 
 
+# Build a source-to-document mirror, falling back to the legacy listing endpoint.
 def fetch_kb_docs(port: int, page_size: int = 50) -> dict[str, list[str]] | None:
     docs: dict[str, list[str]] = {}
     try:
@@ -811,11 +913,17 @@ def main() -> None:
             }
         )
 
-    render_failed = _render_phase(plan, env, source_dir, data_dir, derived_dir, next_manifest)
-    inserted_added, inserted_updated, transient = _insert_phase(plan, port, data_dir, kb_docs, derived_dir, next_manifest)
-    retry_added, retry_updated = _retry_transient_inserts(transient, port, data_dir, kb_docs, derived_dir, next_manifest)
-    added += inserted_added + retry_added
-    updated += inserted_updated + retry_updated
+    for category in _ordered_categories(plan):
+        category_plan = [item for item in plan if item["category"] == category]
+        render_failed += _render_phase(category_plan, env, source_dir, data_dir, derived_dir, next_manifest)
+        inserted_added, inserted_updated, transient = _insert_phase(
+            category_plan, port, data_dir, kb_docs, derived_dir, next_manifest
+        )
+        retry_added, retry_updated = _retry_transient_inserts(
+            transient, port, data_dir, kb_docs, derived_dir, next_manifest
+        )
+        added += inserted_added + retry_added
+        updated += inserted_updated + retry_updated
     insert_failed = sum(1 for item in plan if item["needs_insert"] and item["entry"].get("insert_status") == "failed")
 
     if kb_docs is not None:

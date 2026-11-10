@@ -20,6 +20,7 @@ def _server_entry(python: Path, script: Path, kb_name: str) -> dict:
     return {"command": str(python), "args": [str(script), "--kb", kb_name]}
 
 
+# Merge one server without discarding other settings; back up before overwriting.
 def _merge_json_mcp_server(path: Path, mcp_name: str, entry: dict, print_only: bool) -> int:
     if print_only:
         print(f"--- {path} (mcpServers.{mcp_name}) ---")
@@ -87,6 +88,7 @@ CLIENTS = {
 }
 
 
+# Remove a JSON-configured server only after successfully reading its config.
 def _remove_json_mcp_server(path: Path, mcp_name: str) -> int:
     if not path.exists():
         print(f"File {path} non esiste.")

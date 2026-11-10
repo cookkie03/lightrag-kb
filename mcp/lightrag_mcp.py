@@ -27,6 +27,10 @@ SORT_DIRECTIONS = {"asc", "desc"}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--kb", required=True)
+parser.add_argument("--transport", choices=("stdio", "http", "streamable-http", "sse"), default="stdio")
+parser.add_argument("--host", default="127.0.0.1")
+parser.add_argument("--port", type=int, default=8743)
+parser.add_argument("--path", default="/mcp")
 args, _ = parser.parse_known_args()
 
 registry = load_registry()
@@ -40,6 +44,7 @@ KB_NAME = args.kb
 mcp = FastMCP(f"lightrag-{KB_NAME}")
 
 
+# Probe the selected KB backend without raising on connection failures.
 def _server_up() -> bool:
     try:
         return requests.get(f"{BASE}/health", timeout=3).ok
@@ -47,12 +52,14 @@ def _server_up() -> bool:
         return False
 
 
+# Preserve text responses and format structured results as readable JSON.
 def _serialize(data: Any) -> str:
     if isinstance(data, str):
         return data
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 
 
+# Map supported client strategies to backend modes, rejecting unknown values.
 def _normalize_strategy(strategy: str | None) -> str:
     if strategy is None:
         return "mix"
@@ -63,6 +70,7 @@ def _normalize_strategy(strategy: str | None) -> str:
     return mode
 
 
+# Validate client context fields and translate them to backend payload names.
 def _normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
     if context is None:
         return {}
@@ -100,6 +108,7 @@ def _normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
     return {k: v for k, v in payload.items() if v is not None}
 
 
+# Return an actionable offline message before attempting a backend request.
 def _ensure_server() -> str | None:
     if _server_up():
         return None
@@ -109,6 +118,7 @@ def _ensure_server() -> str | None:
     )
 
 
+# Fetch and serialize a backend resource, omitting unspecified parameters.
 def _get(path: str, **params: Any) -> str:
     offline = _ensure_server()
     if offline:
@@ -119,6 +129,7 @@ def _get(path: str, **params: Any) -> str:
     return _serialize(response.json())
 
 
+# Send specified payload fields to the selected backend and return its JSON.
 def _post(path: str, payload: dict[str, Any], timeout: int = 300) -> Any:
     offline = _ensure_server()
     if offline:
@@ -129,6 +140,7 @@ def _post(path: str, payload: dict[str, Any], timeout: int = 300) -> Any:
     return response.json()
 
 
+# Register a tool that queries the selected KB and returns its answer.
 @mcp.tool()
 def ask(
     question: str,
@@ -148,6 +160,7 @@ def ask(
     return _serialize(data.get("response", data) if isinstance(data, dict) else data)
 
 
+# Register a tool that returns the backend's structured retrieval context.
 @mcp.tool()
 def retrieve_context(
     question: str,
@@ -163,6 +176,7 @@ def retrieve_context(
     return _serialize(data)
 
 
+# Register a paginated document inventory tool with optional status counts.
 @mcp.tool()
 def find_documents(
     status: str | None = None,
@@ -201,4 +215,12 @@ def find_documents(
 
 
 if __name__ == "__main__":
-    mcp.run()
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        mcp.run(
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+            path=args.path,
+        )

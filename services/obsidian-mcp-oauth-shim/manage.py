@@ -15,6 +15,7 @@ from dotenv import set_key
 from app import config, db
 
 
+# Mostra i client registrati e le URI di redirect.
 def list_clients():
     clients = db.list_clients()
     if not clients:
@@ -24,6 +25,7 @@ def list_clients():
         print(f"- {c['client_id']}  ({c['client_name']})  redirect_uris={c['redirect_uris']}")
 
 
+# Elimina un client e le credenziali associate.
 def revoke_client(client_id: str):
     if not db.get_client(client_id):
         print(f"Client {client_id} non trovato.")
@@ -33,6 +35,7 @@ def revoke_client(client_id: str):
     print(f"Client {client_id} revocato (client + auth code + refresh token eliminati).")
 
 
+# Rigenera il segreto JWT persistito per il prossimo riavvio.
 def rotate_jwt_secret():
     new_secret = secrets.token_urlsafe(48)
     set_key(str(config.ENV_PATH), "JWT_SECRET", new_secret, quote_mode="never")
@@ -40,6 +43,7 @@ def rotate_jwt_secret():
     print("Riavvia il servizio: launchctl kickstart -k gui/$(id -u)/com.luca.obsidianmcpoauthshim")
 
 
+# Rigenera il passcode di consenso per il prossimo riavvio.
 def rotate_passcode():
     new_passcode = secrets.token_urlsafe(12)
     set_key(str(config.ENV_PATH), "CONSENT_PASSCODE", new_passcode, quote_mode="never")
@@ -47,6 +51,7 @@ def rotate_passcode():
     print("Riavvia il servizio: launchctl kickstart -k gui/$(id -u)/com.luca.obsidianmcpoauthshim")
 
 
+# Smista i comandi amministrativi e valida gli argomenti richiesti.
 def main():
     if len(sys.argv) < 2:
         print(__doc__)

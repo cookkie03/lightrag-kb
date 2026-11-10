@@ -12,6 +12,26 @@ def test_snapshot_preserves_unicode_and_newlines_without_following_symlinks(tmp_
     assert result["files"][0]["sha256"] == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 
 
+def test_snapshot_marks_broken_symlink_as_incomplete(tmp_path):
+    (tmp_path / "offline").symlink_to(tmp_path / "unavailable")
+    result = snapshot(tmp_path)
+    assert not result["scan_complete"]
+    assert result["scan_errors"]
+
+
+def test_snapshot_detects_root_removed_during_walk(tmp_path, monkeypatch):
+    import sync.client as client
+
+    def vanished(root, **kwargs):
+        root.rmdir()
+        return iter(())
+
+    monkeypatch.setattr(client.os, "walk", vanished)
+    result = snapshot(tmp_path)
+    assert not result["scan_complete"]
+    assert result["scan_errors"]
+
+
 def test_partial_diff_never_deletes_missing_files():
     previous = [{"path": "missing.txt", "size": 1, "mtime_ns": 1, "sha256": "x"}]
     result = diff(previous, [], complete=False)

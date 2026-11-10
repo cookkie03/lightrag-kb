@@ -13,6 +13,7 @@ if not ENV_PATH.exists():
 load_dotenv(ENV_PATH)
 
 
+# Riutilizza un segreto configurato oppure lo genera e lo persiste nel file protetto.
 def _ensure_secret(key: str, nbytes: int = 32) -> str:
     value = os.getenv(key)
     if not value:
@@ -26,24 +27,21 @@ def _ensure_secret(key: str, nbytes: int = 32) -> str:
 JWT_SECRET = _ensure_secret("JWT_SECRET", 48)
 CONSENT_PASSCODE = _ensure_secret("CONSENT_PASSCODE", 12)
 
-ISSUER_URL = os.getenv("ISSUER_URL", "http://127.0.0.1:8420").rstrip("/")
-PORT = int(os.getenv("PORT", "8420"))
+HOST = os.getenv("SHIM_BIND_HOST", "127.0.0.1").strip() or "127.0.0.1"
+PORT = int(os.getenv("SHIM_BIND_PORT", os.getenv("PORT", "8420")))
+ISSUER_URL = os.getenv(
+    "ISSUER_URL",
+    os.getenv("SHIM_PUBLIC_URL", f"http://{HOST}:{PORT}"),
+).rstrip("/")
 
-OBSIDIAN_MCP_URL = os.getenv("OBSIDIAN_MCP_URL", "https://127.0.0.1:27124").rstrip("/")
-OBSIDIAN_API_KEY = os.getenv("OBSIDIAN_API_KEY", "")
-OBSIDIAN_VERIFY_SSL = os.getenv("OBSIDIAN_VERIFY_SSL", "false").lower() == "true"
-
-# Percorso del data.json del plugin "Local REST API with MCP": contiene la
-# apiKey autoritativa. Il plugin la rigenera (insieme al certificato TLS)
-# quando la sua config non è ancora presente su un device che sincronizza lo
-# stesso vault via iCloud — leggerla da qui invece che da OBSIDIAN_API_KEY
-# rende lo shim resiliente a queste rigenerazioni: OBSIDIAN_API_KEY resta
-# solo come fallback se questo file non è raggiungibile.
-OBSIDIAN_PLUGIN_DATA_JSON = os.getenv(
-    "OBSIDIAN_PLUGIN_DATA_JSON",
-    "/Users/luca/Library/Mobile Documents/iCloud~md~obsidian/Documents/Second-Brain"
-    "/.obsidian/plugins/obsidian-local-rest-api/data.json",
-)
+LIGHTRAG_MCP_URL = os.getenv(
+    "LIGHTRAG_MCP_URL",
+    os.getenv("OBSIDIAN_MCP_URL", "http://127.0.0.1:8743/mcp"),
+).rstrip("/")
+LIGHTRAG_MCP_VERIFY_SSL = os.getenv(
+    "LIGHTRAG_MCP_VERIFY_SSL",
+    os.getenv("OBSIDIAN_VERIFY_SSL", "false"),
+).lower() == "true"
 
 ACCESS_TOKEN_TTL = int(os.getenv("ACCESS_TOKEN_TTL_SECONDS", "3600"))
 REFRESH_TOKEN_TTL = int(os.getenv("REFRESH_TOKEN_TTL_SECONDS", str(60 * 60 * 24 * 30)))

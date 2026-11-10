@@ -101,7 +101,7 @@ def validate_safe_relative_path(
       The resolved path must be relative to base_dir.resolve().
       If the path exists and is a symlink: its target must resolve inside base_dir.resolve().
     """
-    raw = str(path).strip()
+    raw = str(path)
     if not raw:
         raise SafePathError("Il percorso non può essere vuoto.")
     if "\0" in raw:
@@ -138,9 +138,10 @@ def validate_safe_relative_path(
         except ValueError:
             raise SafePathError(f"Percorso '{raw}' tenta di uscire dalla sandbox '{base}'")
 
+        # Reject symlinks in any component when callers require an unaliased path.
+        if not allow_symlinks and any((base / Path(*p.parts[:i])).is_symlink() for i in range(1, len(p.parts) + 1)):
+            raise SafePathError(f"Symlink non consentito: '{raw}'")
         if candidate.is_symlink():
-            if not allow_symlinks:
-                raise SafePathError(f"Symlink non consentito: '{raw}'")
             try:
                 target_resolved = Path(os.path.realpath(candidate)).resolve()
                 target_resolved.relative_to(base)
@@ -219,6 +220,7 @@ class ParsedDocument:
     metadata: dict[str, Any] = field(default_factory=dict)
     sidecar: dict[str, Any] = field(default_factory=dict)
 
+    # Serialize the parsed content together with its metadata and sidecar.
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -263,6 +265,7 @@ def get_linux_docling_config(env: dict[str, str] | None = None) -> dict[str, Any
     langs = [item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()]
     locales = [LOCALE_MAP.get(item, item) for item in langs]
 
+    # Interpret explicit false-like environment values as disabled options.
     def _bool_flag(key: str, default: str = "1") -> bool:
         return env.get(key, default).strip().lower() not in {"0", "false", "no", "off"}
 
@@ -507,7 +510,7 @@ def parse_visual_document(
     config = get_linux_docling_config(env)
     exec_runner = runner or run_docling_subprocess
 
-    # Probe text for PDFs to check for garbled characters
+    # Probe PDF text before conversion; a failed probe falls back to full-page OCR.
     force_full_page = category == "images"
     probe_sample = ""
     if category == "pdf":

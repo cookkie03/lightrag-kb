@@ -11,7 +11,7 @@ HOME = Path(__file__).resolve().parent.parent
 CONFIG = HOME / "config" / "global.env"
 REGISTRY = HOME / "config" / "registry.yaml"
 KB_ROOT = HOME / "kb"
-ENGINE_DIR = HOME / ".venv-engine"
+ENGINE_DIR = HOME / ".venv"
 ENGINE_PYTHON = ENGINE_DIR / "bin" / "python"
 LIGHTRAG_SERVER = ENGINE_DIR / "bin" / "lightrag-server"
 MCP_SCRIPT = HOME / "mcp" / "lightrag_mcp.py"
@@ -37,12 +37,27 @@ def global_env() -> dict[str, str]:
     env = load_env(CONFIG)
     env.setdefault("ENGINE_PYTHON", str(ENGINE_PYTHON))
     env.setdefault("LIGHTRAG_SERVER_BIN", str(LIGHTRAG_SERVER))
+    platform_value = env.get("DOCLING_PLATFORM", env.get("DEPLOY_PLATFORM", "auto"))
+    platform_value = platform_value.strip().lower() or "auto"
+    if platform_value in {"darwin", "macos"}:
+        platform_value = "mac"
+    env["DOCLING_PLATFORM"] = platform_value
     env.setdefault("DOCLING_PYTHON", env["ENGINE_PYTHON"])
     env.setdefault("DOCLING_LANG", "it,en")
     env.setdefault("DOCLING_TIMEOUT", "3600")
+    env.setdefault("DOCLING_OCR_ENGINE", "auto")
+    env.setdefault(
+        "DOCLING_ASR_ENGINE",
+        "whisper_turbo_native" if env.get("DOCLING_PLATFORM") == "linux" else "auto",
+    )
+    env.setdefault("DOCLING_ACCELERATOR", "auto")
+    env.setdefault("DOCLING_ENABLE_TABLES", "1")
+    env.setdefault("DOCLING_ENABLE_CODE_ENRICHMENT", "1")
+    env.setdefault("DOCLING_ENABLE_FORMULA_ENRICHMENT", "1")
+    env.setdefault("DOCLING_IMAGE_SCALE", "2.0")
     env.setdefault("LLM_PROVIDER", "ollama")
     env.setdefault("OLLAMA_HOST", "http://localhost:11434")
-    env.setdefault("LLM_MODEL", "granite4.1:3b")
+    env.setdefault("LLM_MODEL", "gemma4:e2b")
     env.setdefault("EMBEDDING_MODEL", "qwen3-embedding:0.6b")
     env.setdefault("EMBEDDING_DIM", "1024")
     env.setdefault("OLLAMA_LLM_NUM_CTX", "8192")
@@ -63,6 +78,14 @@ def global_env() -> dict[str, str]:
     env.setdefault("CHUNK_OVERLAP_SIZE", "150")
     env.setdefault("COSINE_THRESHOLD", "0.25")
     env.setdefault("BASE_PORT", "9621")
+    env.setdefault("MCP_BIND_HOST", "127.0.0.1")
+    env.setdefault("MCP_BIND_PORT", "8743")
+    env.setdefault("MCP_PATH", "/mcp")
+    env.setdefault("PUBLIC_MCP_KB", "")
+    env.setdefault("SHIM_BIND_HOST", "127.0.0.1")
+    env.setdefault("SHIM_BIND_PORT", "8420")
+    env.setdefault("TAILSCALE_FUNNEL_PORT", "8443")
+    env.setdefault("SHIM_PUBLIC_URL", "https://your-node.your-tailnet.ts.net")
     return env
 
 
@@ -207,6 +230,7 @@ def normalize_exclude_specs_for_kb(specs: list[str], source_dir: Path) -> tuple[
     return normalized, changed
 
 
+# Enumerate source directories while excluding the data tree and symlink cycles.
 def _source_rel_dirs(source_dir: Path, data_dir: Path) -> list[str]:
     data_root = data_dir.resolve()
     rel_dirs: list[str] = []
@@ -285,6 +309,7 @@ def path_is_excluded(rel_path: str, specs: list[str]) -> bool:
     return False
 
 
+# Expand folder rules against source directories, preserving unmatched rules.
 def expand_exclude_specs(specs: list[str], source_dir: Path, data_dir: Path) -> list[str]:
     canonical, _ = canonicalize_exclude_specs(specs)
     expanded: list[str] = []
@@ -346,6 +371,10 @@ def write_kb_env(kb: dict, env: dict[str, str] | None = None) -> Path:
         f"DOCLING_PYTHON={env['DOCLING_PYTHON']}",
         f"DOCLING_LANG={env['DOCLING_LANG']}",
         f"DOCLING_TIMEOUT={env['DOCLING_TIMEOUT']}",
+        f"MCP_BIND_HOST={env.get('MCP_BIND_HOST', '127.0.0.1')}",
+        f"MCP_BIND_PORT={env.get('MCP_BIND_PORT', '8743')}",
+        f"MCP_PATH={env.get('MCP_PATH', '/mcp')}",
+        f"KB_NAME={kb['name']}",
         "HOST=127.0.0.1",
         f"PORT={kb['port']}",
         f"SOURCE_DIR={kb['source_dir']}",
@@ -386,7 +415,11 @@ def write_kb_env(kb: dict, env: dict[str, str] | None = None) -> Path:
     if embedding_api_key:
         lines.append(f"EMBEDDING_BINDING_API_KEY={embedding_api_key}")
     env_path = Path(kb["data_dir"]) / ".env"
-    env_path.write_text("\n".join(lines) + "\n")
+    text = "\n".join(lines) + "\n"
+    env_path.write_text(text)
+    service_env_path = Path.home() / ".config" / "lightrag-kb" / f"{kb['name']}.env"
+    service_env_path.parent.mkdir(parents=True, exist_ok=True)
+    service_env_path.write_text(text)
     return env_path
 
 

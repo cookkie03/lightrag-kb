@@ -43,6 +43,11 @@ if str(ROOT / "bin") not in sys.path:
     sys.path.insert(0, str(ROOT / "bin"))
 
 from kb_registry import find_kb, global_env, load_registry, storage_mode  # noqa: E402
+from pipeline.dreaming import (  # noqa: E402
+    deprecate_memory_by_id,
+    query_memories,
+    remember_memory,
+)
 from storage.catalog import Catalog, DEFAULT_KB_ROOT, DocumentRecord, JobRecord  # noqa: E402
 
 logger = logging.getLogger("mcp.kb_router")
@@ -125,6 +130,7 @@ def _normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
 class KBRouter:
     """Route KB requests to the registry, LightRAG backend and JSON catalog."""
 
+    # Keep injected registry, storage and HTTP dependencies for KB-scoped requests.
     def __init__(
         self,
         registry: dict[str, Any] | Callable[[], dict[str, Any]] | None = None,
@@ -635,12 +641,137 @@ class KBRouter:
             ),
         })
 
+    def remember(
+        self,
+        kb: str,
+        content: str,
+        memory_type: str = "fact",
+        title: str = "",
+        tags: list[str] | None = None,
+        supersedes_id: str | None = None,
+        source: str = "agent",
+    ) -> str:
+        """Store an agent memory in Markdown frontmatter format in <source_dir>/memories/."""
+        kb_info = self.get_kb(kb)
+        if not kb_info:
+            return _serialize({
+                "error": "KB_NOT_FOUND",
+                "kb": kb,
+                "message": f"KB '{kb}' non trovata nel registro.",
+            })
+
+        source_dir = kb_info.get("source_dir")
+        try:
+            mem = remember_memory(
+                source_dir=source_dir,
+                content=content,
+                memory_type=memory_type,
+                title=title,
+                tags=tags,
+                supersedes_id=supersedes_id,
+                source=source,
+            )
+            return _serialize({
+                "status": "ok",
+                "kb": kb,
+                "memory": mem.to_dict(),
+            })
+        except Exception as exc:
+            return _serialize({
+                "error": "REMEMBER_FAILED",
+                "kb": kb,
+                "message": str(exc),
+            })
+
+    def search_memory(
+        self,
+        kb: str,
+        query: str,
+        memory_type: str | None = None,
+        active_only: bool = True,
+        top_k: int = 5,
+    ) -> str:
+        """Search structured agent memories by query, status, and type."""
+        kb_info = self.get_kb(kb)
+        if not kb_info:
+            return _serialize({
+                "error": "KB_NOT_FOUND",
+                "kb": kb,
+                "message": f"KB '{kb}' non trovata nel registro.",
+            })
+
+        source_dir = kb_info.get("source_dir")
+        try:
+            results = query_memories(
+                source_dir=source_dir,
+                query=query,
+                memory_type=memory_type,
+                active_only=active_only,
+                top_k=top_k,
+            )
+            return _serialize({
+                "status": "ok",
+                "kb": kb,
+                "count": len(results),
+                "memories": [m.to_dict() for m in results],
+            })
+        except Exception as exc:
+            return _serialize({
+                "error": "SEARCH_MEMORY_FAILED",
+                "kb": kb,
+                "message": str(exc),
+            })
+
+    def deprecate_memory(
+        self,
+        kb: str,
+        memory_id: str,
+        reason: str = "",
+        superseded_by: str | None = None,
+    ) -> str:
+        """Mark an agent memory as superseded or deprecated."""
+        kb_info = self.get_kb(kb)
+        if not kb_info:
+            return _serialize({
+                "error": "KB_NOT_FOUND",
+                "kb": kb,
+                "message": f"KB '{kb}' non trovata nel registro.",
+            })
+
+        source_dir = kb_info.get("source_dir")
+        try:
+            updated = deprecate_memory_by_id(
+                source_dir=source_dir,
+                memory_id=memory_id,
+                reason=reason,
+                superseded_by=superseded_by,
+            )
+            if not updated:
+                return _serialize({
+                    "error": "MEMORY_NOT_FOUND",
+                    "kb": kb,
+                    "memory_id": memory_id,
+                    "message": f"Memoria '{memory_id}' non trovata.",
+                })
+            return _serialize({
+                "status": "ok",
+                "kb": kb,
+                "memory": updated.to_dict(),
+            })
+        except Exception as exc:
+            return _serialize({
+                "error": "DEPRECATE_MEMORY_FAILED",
+                "kb": kb,
+                "message": str(exc),
+            })
+
 
 def build_mcp_server(router: KBRouter | None = None) -> FastMCP:
     """Build and configure the FastMCP router instance exposing §6 tools."""
     active_router = router or KBRouter()
     mcp_app = FastMCP("lightrag-router")
 
+    # Register the router methods as MCP tools; each delegates to this router instance.
     @mcp_app.tool()
     def list_kbs() -> str:
         """List all available Knowledge Bases with ports, storage modes, and current operational status."""
@@ -720,6 +851,59 @@ def build_mcp_server(router: KBRouter | None = None) -> FastMCP:
             kb=kb, left_source=left_source, right_source=right_source, mode=mode
         )
 
+    @mcp_app.tool()
+    def remember(
+        kb: str,
+        content: str,
+        memory_type: str = "fact",
+        title: str = "",
+        tags: list[str] | None = None,
+        supersedes_id: str | None = None,
+        source: str = "agent",
+    ) -> str:
+        """Store an agent memory in Markdown frontmatter format in <source_dir>/memories/."""
+        return active_router.remember(
+            kb=kb,
+            content=content,
+            memory_type=memory_type,
+            title=title,
+            tags=tags,
+            supersedes_id=supersedes_id,
+            source=source,
+        )
+
+    @mcp_app.tool()
+    def search_memory(
+        kb: str,
+        query: str,
+        memory_type: str | None = None,
+        active_only: bool = True,
+        top_k: int = 5,
+    ) -> str:
+        """Search structured agent memories by query, status, and type."""
+        return active_router.search_memory(
+            kb=kb,
+            query=query,
+            memory_type=memory_type,
+            active_only=active_only,
+            top_k=top_k,
+        )
+
+    @mcp_app.tool()
+    def deprecate_memory(
+        kb: str,
+        memory_id: str,
+        reason: str = "",
+        superseded_by: str | None = None,
+    ) -> str:
+        """Mark an agent memory as superseded or deprecated."""
+        return active_router.deprecate_memory(
+            kb=kb,
+            memory_id=memory_id,
+            reason=reason,
+            superseded_by=superseded_by,
+        )
+
     return mcp_app
 
 
@@ -736,6 +920,9 @@ job_status = router.job_status
 evidence = router.evidence
 discover_duplicates = router.discover_duplicates
 compare_folders = router.compare_folders
+remember = router.remember
+search_memory = router.search_memory
+deprecate_memory = router.deprecate_memory
 
 
 def main() -> None:

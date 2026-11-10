@@ -4,7 +4,7 @@ CLI minimale per gestire knowledge base LightRAG locali con:
 
 - WebUI come superficie principale per gli umani
 - MCP query-only per coding agent
-- un solo runtime Python condiviso per `ragcli`, `lightrag-server`, LightRAG e Docling
+- un solo runtime Python condiviso per `ragcli`, `lightrag-server`, LightRAG, Docling e shim OAuth
 - ingest incrementale dalla cartella sorgente reale
 
 ## Modello operativo
@@ -49,16 +49,32 @@ Dopo il clone:
 
 Lo script:
 
-1. crea `.venv-engine`
-2. installa lì `lightrag-hku[api]`, `ollama`, `docling[asr,ocrmac,easyocr]`, `fastmcp`, `requests`, `pyyaml`
+1. crea `.venv`
+2. installa lì `lightrag-hku[api]`, `ollama`, Docling, le dipendenze MCP e quelle dello shim OAuth
 3. crea i symlink:
    - `~/.local/bin/ragcli`
    - `~/.local/bin/lightrag-server`
 4. crea `config/global.env` da `config/global.env.example` se mancante
+5. su Linux installa le unit `systemd --user` e pubblica lo shim via `tailscale funnel`
+
+## Linux Bootstrap
+
+Flusso consigliato su Linux:
+
+```bash
+./setup.sh
+ragcli doctor
+ragcli service status
+```
+
+`setup.sh` prepara il runtime condiviso, sincronizza la config centrale (`config/global.env`), installa le unit `systemd --user` del repo e configura `tailscale funnel` per esporre pubblicamente lo shim OAuth.
+
+Per avviare anche il backend MCP pubblico su Linux, imposta `PUBLIC_MCP_KB=<nome-kb>` in `config/global.env`: il bootstrap abilita `lightrag-server@`, `lightrag-watchdog@`, `lightrag-mcp@` e poi lo shim OAuth che li espone via Tailscale.
 
 ## CLI pubblica
 
 ```bash
+ragcli doctor
 ragcli add <name> <source_dir> [--port]
 ragcli list
 ragcli ingest <name> [--force]
@@ -70,6 +86,9 @@ ragcli remove <name>
 ragcli mcp add <name> --client <client|all>
 ragcli mcp rm <name> --client <client|all>
 ragcli move <name>
+ragcli service status [nome-servizio]
+ragcli service restart [nome-servizio]
+ragcli service logs [nome-servizio]
 ```
 
 Esempio rapido:
@@ -99,9 +118,9 @@ WebUI: `http://127.0.0.1:<porta>`
 - scopre i candidati dalla `source_dir`
 - esegue render e insert come fasi separate
 - per testo/codice usa il contenuto originale
-- per PDF e immagini usa Docling con profilo high-quality per macOS
+- per PDF e immagini usa Docling con profilo high-quality coerente con `DOCLING_PLATFORM`
 - per Office, ODF, EPUB, EML, MSG usa il parsing nativo Docling
-- per audio/video usa Docling ASR con `WHISPER_TURBO_MLX`
+- per audio/video usa Docling ASR coerente con `DOCLING_PLATFORM`
 - salva i derivati in `derived/...`
 - usa un manifest phase-aware per saltare rerender inutili e ritentare solo gli insert mancati
 - prova gli insert in un ordine più stabile: testo, office, PDF/immagini, audio/video
@@ -112,6 +131,18 @@ WebUI: `http://127.0.0.1:<porta>`
 - rigenera i derivati
 - ricostruisce manifest e cache locali
 - riallinea forzatamente il KB con la sorgente
+
+## Docling
+
+La configurazione sta nel file centrale `config/global.env`. Il selettore principale è `DOCLING_PLATFORM`:
+
+- `linux` per runtime Linux locali o remoti
+- `mac` per Apple Silicon/macOS
+- `auto` per derivarlo dal sistema operativo
+
+`DOCLING_OCR_ENGINE`, `DOCLING_ASR_ENGINE` e `DOCLING_ACCELERATOR` restano disponibili come override espliciti, ma non sono più il punto di configurazione principale.
+
+I formati di ingest restano invariati. PDF/immagini usano Docling con struttura tabelle abilitata; Office, ODF, EPUB, EML e MSG restano sul parsing Docling nativo; audio/video restano su ASR Docling.
 
 ## Docling su macOS
 
@@ -164,3 +195,17 @@ Variabili principali:
 - `LLM_MODEL`
 - `EMBEDDING_MODEL`
 - `BASE_PORT`
+- `MCP_BIND_HOST`
+- `MCP_BIND_PORT`
+- `MCP_PATH`
+- `PUBLIC_MCP_KB`
+- `SHIM_BIND_HOST`
+- `SHIM_BIND_PORT`
+- `TAILSCALE_FUNNEL_PORT`
+- `SHIM_PUBLIC_URL`
+
+## Shim OAuth
+
+Lo shim resta con OAuth e su Linux gira dietro `systemd --user`, in bind locale su `127.0.0.1`, poi viene pubblicato su internet tramite `tailscale funnel`. L'URL pubblico finale è quello configurato in `SHIM_PUBLIC_URL`; il bootstrap prova anche a derivarlo automaticamente da `tailscale status --json` quando trova il placeholder iniziale.
+
+Il backend reale dietro lo shim è `mcp/lightrag_mcp.py`, esposto in `streamable-http` su `MCP_BIND_HOST:MCP_BIND_PORT` e configurato nello shim come `LIGHTRAG_MCP_URL`.
