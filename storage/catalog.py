@@ -445,12 +445,12 @@ class Catalog:
             job["updated_at"] = utc_now_iso()
             return JobRecord(**copy.deepcopy(job))
 
+            return JobRecord(**copy.deepcopy(job))
+
     def list_jobs(self, kb_id=None, source_id=None, stage=None, limit=50):
         """List recent jobs with optional KB, source and stage filters."""
         with self._snapshot() as data:
-            jobs = (j for j in data["jobs"].values() if (kb_id is None or j["kb_id"] == kb_id) and (source_id is None or j["source_id"] == source_id) and (stage is None or j["stage"] == stage))
-            return [JobRecord(**copy.deepcopy(j)) for j in sorted(jobs, key=lambda j: j["created_at"], reverse=True)[:limit]]
-
+            matching_jobs = []
     def increment_job_counter(self, job_id, counter_name, delta=1):
         """Increment a job counter under the same lock as the snapshot write."""
         with self._snapshot() as data:
