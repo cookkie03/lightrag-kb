@@ -24,7 +24,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -48,7 +47,7 @@ from pipeline.dreaming import (  # noqa: E402
     query_memories,
     remember_memory,
 )
-from storage.catalog import Catalog, DEFAULT_KB_ROOT, DocumentRecord, JobRecord  # noqa: E402
+from storage.catalog import Catalog, DEFAULT_KB_ROOT  # noqa: E402
 
 logger = logging.getLogger("mcp.kb_router")
 if not logger.handlers:
@@ -180,10 +179,10 @@ class KBRouter:
                 # Check recent jobs for failure or review markers
                 recent_jobs = cat.list_jobs(limit=25)
                 for j in recent_jobs:
-                    if j.stage in ("FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"):
-                        reason = f"Job '{j.job_id}' in stato {j.stage}"
-                        if j.error_summary:
-                            reason += f": {j.error_summary}"
+                    if j["stage"] in ("FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"):
+                        reason = f"Job '{j['job_id']}' in stato {j['stage']}"
+                        if j["error_summary"]:
+                            reason += f": {j['error_summary']}"
                         return True, reason
 
                 # Check if any document failed indexing/extraction
@@ -468,20 +467,20 @@ class KBRouter:
                 })
 
             result = {
-                "job_id": job.job_id,
-                "kb": job.kb_id,
-                "stage": job.stage,
-                "idempotency_key": job.idempotency_key,
-                "source_id": job.source_id,
-                "scan_id": job.scan_id,
-                "progress": job.counters,
-                "warnings": job.warnings,
-                "error_summary": job.error_summary,
-                "retryable": job.stage == "FAILED_RETRYABLE",
-                "needs_review": job.stage == "NEEDS_REVIEW",
-                "resume_marker": job.resume_marker,
-                "created_at": job.created_at,
-                "updated_at": job.updated_at,
+                "job_id": job["job_id"],
+                "kb": job["kb_id"],
+                "stage": job["stage"],
+                "idempotency_key": job["idempotency_key"],
+                "source_id": job["source_id"],
+                "scan_id": job["scan_id"],
+                "progress": job["counters"],
+                "warnings": job["warnings"],
+                "error_summary": job["error_summary"],
+                "retryable": job["stage"] == "FAILED_RETRYABLE",
+                "needs_review": job["stage"] == "NEEDS_REVIEW",
+                "resume_marker": job["resume_marker"],
+                "created_at": job["created_at"],
+                "updated_at": job["updated_at"],
             }
             return _serialize(result)
 
@@ -507,9 +506,9 @@ class KBRouter:
                     "message": f"Documento '{doc_id}' non trovato nel catalogo della KB '{kb}'.",
                 })
 
-            occurrences = cat.resolve_evidence(doc.canonical_doc_id)
+            occurrences = cat.resolve_evidence(doc["canonical_doc_id"])
 
-        artifact_path = doc.extracted_artifact_path
+        artifact_path = doc["extracted_artifact_path"]
         content_snippet: str | None = None
         chunk_info: dict[str, Any] | None = None
         metadata: dict[str, Any] = {}
@@ -561,11 +560,11 @@ class KBRouter:
 
         is_degraded, degraded_reason = self.check_kb_degraded(kb)
         result: dict[str, Any] = {
-            "canonical_doc_id": doc.canonical_doc_id,
-            "lightrag_doc_id": doc.lightrag_doc_id,
-            "lightrag_status": doc.lightrag_status,
-            "derived_hash": doc.derived_hash,
-            "extracted_artifact_path": doc.extracted_artifact_path,
+            "canonical_doc_id": doc["canonical_doc_id"],
+            "lightrag_doc_id": doc["lightrag_doc_id"],
+            "lightrag_status": doc["lightrag_status"],
+            "derived_hash": doc["derived_hash"],
+            "extracted_artifact_path": doc["extracted_artifact_path"],
             "occurrences": occurrences,
             "content_snippet": content_snippet,
             "chunk": chunk_info,

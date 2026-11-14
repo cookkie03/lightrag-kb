@@ -29,10 +29,8 @@ import json
 import logging
 import os
 import sys
-import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +41,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.parsers import (
-    ParsedDocument,
     SafePathError,
     utc_now_iso,
     validate_safe_relative_path,
 )
-from storage.catalog import Catalog, DocumentRecord, FileRecord
+from storage.catalog import Catalog
 
 logger = logging.getLogger("pipeline.indexer")
 if not logger.handlers:
@@ -101,48 +98,23 @@ class KBLockedError(LightRAGError):
     """Raised when the single-writer lock for the Knowledge Base cannot be acquired (§5)."""
 
 
-@dataclass
-class IndexResult:
-    """Outcome of an indexing operation."""
-
-    action: str
-    canonical_doc_id: str
-    status: str
-    lightrag_doc_id: str | None = None
-    reused: bool = False
-    details: dict[str, Any] | None = None
-
-
-@dataclass
-class PersistentCheckpoint:
-    """Persistent on-disk checkpoint representation for atomic update and recovery (§5)."""
-
-    checkpoint_id: str
-    stage: str  # "READY", "OLD_DELETED", "CATALOG_PENDING", "INSERTING_NEW", "COMPLETED", "FAILED"
-    source_id: str
-    relative_path: str
-    old_canonical_doc_id: str
-    old_lightrag_doc_id: str | None
-    old_text_content: str
-    old_derived_hash: str | None
-    old_artifact_path: str | None
-    old_binary_sha256: str
-    old_size: int
-    old_mtime_ns: int
-    new_canonical_doc_id: str
-    new_derived_hash: str
-    new_artifact_path: str | None
-    created_at: str
-    updated_at: str
-
-    # Serialize the checkpoint for persistent recovery.
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    # Reconstruct a checkpoint from its persisted fields.
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> PersistentCheckpoint:
-        return cls(**data)
+def create_index_result(
+    action: str,
+    canonical_doc_id: str,
+    status: str,
+    lightrag_doc_id: str | None = None,
+    reused: bool = False,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create an index result as a plain dict."""
+    return {
+        "action": action,
+        "canonical_doc_id": canonical_doc_id,
+        "status": status,
+        "lightrag_doc_id": lightrag_doc_id,
+        "reused": reused,
+        "details": details,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -154,25 +126,19 @@ class KBWriterLock:
     """Advisory single-writer lock per Knowledge Base (§5: 'un solo writer per KB').
 
     Uses POSIX advisory locking (fcntl.flock) on a persistent lock file.
-    Supports re-entrant acquisition within the same thread.
+    Supports re-entrant acquisition within the same process.
     """
 
-    # Keep thread ownership and nesting separate from the process-wide file lock.
     def __init__(self, lock_path: Path | str, kb_id: str = "") -> None:
         self.lock_path = Path(lock_path).resolve()
         self.kb_id = kb_id
         self._fd: int | None = None
         self._depth: int = 0
-        self._owner_thread: int | None = None
-        self._local_lock = threading.Lock()
 
-    # Acquire the KB lock, allowing re-entry by its owning thread.
     def acquire(self, timeout: float = 0.0, poll_interval: float = 0.05) -> bool:
-        current_thread = threading.get_ident()
-        with self._local_lock:
-            if self._owner_thread == current_thread and self._depth > 0:
-                self._depth += 1
-                return True
+        if self._depth > 0:
+            self._depth += 1
+            return True
 
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
         start_time = time.time()
@@ -180,17 +146,10 @@ class KBWriterLock:
             try:
                 fd = os.open(self.lock_path, os.O_RDWR | os.O_CREAT, 0o644)
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                with self._local_lock:
-                    self._fd = fd
-                    self._depth = 1
-                    self._owner_thread = current_thread
+                self._fd = fd
+                self._depth = 1
                 return True
             except (BlockingIOError, OSError) as exc:
-                if "fd" in locals() and fd is not None:
-                    try:
-                        os.close(fd)
-                    except OSError:
-                        pass
                 if (time.time() - start_time) >= timeout:
                     raise KBLockedError(
                         f"Impossibile acquisire il lock per la KB '{self.kb_id}' "
@@ -198,30 +157,23 @@ class KBWriterLock:
                     ) from exc
                 time.sleep(poll_interval)
 
-    # Release the file lock only when the owner's nesting depth reaches zero.
     def release(self) -> None:
-        current_thread = threading.get_ident()
-        with self._local_lock:
-            if self._owner_thread != current_thread or self._depth <= 0:
-                return
-            self._depth -= 1
-            if self._depth == 0:
-                try:
-                    if self._fd is not None:
-                        fcntl.flock(self._fd, fcntl.LOCK_UN)
-                        os.close(self._fd)
-                except OSError:
-                    pass
-                finally:
-                    self._fd = None
-                    self._owner_thread = None
+        if self._depth <= 0:
+            return
+        self._depth -= 1
+        if self._depth == 0 and self._fd is not None:
+            try:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                os.close(self._fd)
+            except OSError:
+                pass
+            finally:
+                self._fd = None
 
-    # Acquire the writer lock for a scoped operation.
     def __enter__(self) -> KBWriterLock:
         self.acquire()
         return self
 
-    # Balance scoped acquisition even when the operation raises.
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.release()
 
@@ -550,21 +502,21 @@ class ProtectedIndexer:
         return self.checkpoints_dir / f"chk_{checkpoint_id}.json"
 
     # Replace the checkpoint atomically after updating its timestamp.
-    def _save_checkpoint(self, checkpoint: PersistentCheckpoint) -> None:
-        checkpoint.updated_at = utc_now_iso()
-        chk_path = self._checkpoint_path(checkpoint.checkpoint_id)
+    def _save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        checkpoint["updated_at"] = utc_now_iso()
+        chk_path = self._checkpoint_path(checkpoint["checkpoint_id"])
         tmp_path = chk_path.with_suffix(".tmp")
-        tmp_path.write_text(json.dumps(checkpoint.to_dict(), indent=2), encoding="utf-8")
+        tmp_path.write_text(json.dumps(checkpoint, indent=2), encoding="utf-8")
         tmp_path.replace(chk_path)
 
     # Persist the recovery stage before the corresponding mutation.
-    def _update_checkpoint_stage(self, checkpoint: PersistentCheckpoint, stage: str) -> None:
-        checkpoint.stage = stage
+    def _update_checkpoint_stage(self, checkpoint: dict[str, Any], stage: str) -> None:
+        checkpoint["stage"] = stage
         self._save_checkpoint(checkpoint)
 
     # Best-effort cleanup after completion or successful recovery.
-    def _remove_checkpoint(self, checkpoint: PersistentCheckpoint) -> None:
-        chk_path = self._checkpoint_path(checkpoint.checkpoint_id)
+    def _remove_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        chk_path = self._checkpoint_path(checkpoint["checkpoint_id"])
         try:
             if chk_path.exists():
                 chk_path.unlink()
@@ -584,19 +536,18 @@ class ProtectedIndexer:
         for chk_path in sorted(self.checkpoints_dir.glob("chk_*.json")):
             try:
                 data = json.loads(chk_path.read_text(encoding="utf-8"))
-                chk = PersistentCheckpoint.from_dict(data)
-                if chk.stage in ("OLD_DELETED", "CATALOG_PENDING", "INSERTING_NEW"):
+                if data["stage"] in ("OLD_DELETED", "CATALOG_PENDING", "INSERTING_NEW"):
                     logger.warning(
                         "Rilevato checkpoint non completato da crash precedente: %s "
                         "(doc: %s, file: %s, stage: %s). Avvio recovery...",
-                        chk.checkpoint_id,
-                        chk.old_canonical_doc_id,
-                        chk.relative_path,
-                        chk.stage,
+                        data["checkpoint_id"],
+                        data["old_canonical_doc_id"],
+                        data["relative_path"],
+                        data["stage"],
                     )
-                    self._execute_recovery(chk, original_exc=None, raise_on_success=False)
-                    recovered.append(chk.checkpoint_id)
-                elif chk.stage == "READY":
+                    self._execute_recovery(data, original_exc=None, raise_on_success=False)
+                    recovered.append(data["checkpoint_id"])
+                elif data["stage"] == "READY":
                     # Checkpoint created before index mutation; safe to discard
                     chk_path.unlink(missing_ok=True)
             except Exception as exc:
@@ -607,76 +558,76 @@ class ProtectedIndexer:
 
     def _execute_recovery(
         self,
-        checkpoint: PersistentCheckpoint,
+        checkpoint: dict[str, Any],
         original_exc: Exception | None = None,
         raise_on_success: bool = True,
     ) -> None:
         """Execute recovery from persistent checkpoint restoring LightRAG and Catalog (§5)."""
         logger.warning(
             "Avvio recovery per '%s' (canonical doc: %s) da checkpoint %s...",
-            checkpoint.relative_path,
-            checkpoint.old_canonical_doc_id,
-            checkpoint.checkpoint_id,
+            checkpoint["relative_path"],
+            checkpoint["old_canonical_doc_id"],
+            checkpoint["checkpoint_id"],
         )
         try:
             # 1. Restore previous derived text to LightRAG
-            self.client.insert_text(checkpoint.old_text_content, file_source=checkpoint.old_canonical_doc_id)
-            rec_doc = self.client.wait_for_processed(file_source=checkpoint.old_canonical_doc_id)
+            self.client.insert_text(checkpoint["old_text_content"], file_source=checkpoint["old_canonical_doc_id"])
+            rec_doc = self.client.wait_for_processed(file_source=checkpoint["old_canonical_doc_id"])
             rec_lightrag_id = rec_doc.get("id")
 
             # 2. Restore catalog document status
             self.catalog.update_document_status(
-                canonical_doc_id=checkpoint.old_canonical_doc_id,
+                canonical_doc_id=checkpoint["old_canonical_doc_id"],
                 lightrag_status="PROCESSED",
                 lightrag_doc_id=rec_lightrag_id,
             )
 
             # 3. Restore catalog file record
             self.catalog.record_file(
-                source_id=checkpoint.source_id,
-                relative_path=checkpoint.relative_path,
-                binary_sha256=checkpoint.old_binary_sha256,
-                size=checkpoint.old_size,
-                mtime_ns=checkpoint.old_mtime_ns,
-                canonical_doc_id=checkpoint.old_canonical_doc_id,
+                source_id=checkpoint["source_id"],
+                relative_path=checkpoint["relative_path"],
+                binary_sha256=checkpoint["old_binary_sha256"],
+                size=checkpoint["old_size"],
+                mtime_ns=checkpoint["old_mtime_ns"],
+                canonical_doc_id=checkpoint["old_canonical_doc_id"],
                 active=True,
             )
 
             # 4. Clean failed new document entry if different and unreferenced
-            if checkpoint.new_canonical_doc_id != checkpoint.old_canonical_doc_id:
-                self.catalog.delete_document_if_unreferenced(checkpoint.new_canonical_doc_id)
+            if checkpoint["new_canonical_doc_id"] != checkpoint["old_canonical_doc_id"]:
+                self.catalog.delete_document_if_unreferenced(checkpoint["new_canonical_doc_id"])
 
             # 5. Remove completed checkpoint file
             self._remove_checkpoint(checkpoint)
 
-            logger.info("Recovery riuscito per '%s': stato precedente ripristinato.", checkpoint.relative_path)
+            logger.info("Recovery riuscito per '%s': stato precedente ripristinato.", checkpoint["relative_path"])
             if raise_on_success:
                 raise RecoverySucceededError(
-                    f"Aggiornamento di '{checkpoint.relative_path}' fallito ({original_exc}), "
+                    f"Aggiornamento di '{checkpoint['relative_path']}' fallito ({original_exc}), "
                     f"ma la recovery da checkpoint ha ripristinato con successo lo stato precedente."
                 ) from original_exc
 
         except RecoverySucceededError:
             raise
         except Exception as rec_exc:
-            logger.critical("Recovery fallita per '%s': %s", checkpoint.relative_path, rec_exc)
-            self.catalog.update_document_status(checkpoint.old_canonical_doc_id, "FAILED")
+            logger.critical("Recovery fallita per '%s': %s", checkpoint["relative_path"], rec_exc)
+            self.catalog.update_document_status(checkpoint["old_canonical_doc_id"], "FAILED")
             self._update_checkpoint_stage(checkpoint, "FAILED")
             cause = original_exc or rec_exc
             raise RecoveryFailedError(
-                f"Aggiornamento di '{checkpoint.relative_path}' fallito E recovery da checkpoint fallita "
+                f"Aggiornamento di '{checkpoint['relative_path']}' fallito E recovery da checkpoint fallita "
                 f"({rec_exc}): la KB è in stato DEGRADED."
             ) from cause
 
     def index_new(
         self,
-        parsed: ParsedDocument,
+        parsed: dict[str, Any],
         source_id: str,
         relative_path: str,
         size: int,
         mtime_ns: int,
         artifact_path: Path | str | None = None,
-    ) -> IndexResult:
+    ) -> dict[str, Any]:
         """Index a new file occurrence (§5 Add).
 
         1. Check if binary_sha256 or derived_hash is already known and PROCESSED in catalog.
@@ -689,59 +640,59 @@ class ProtectedIndexer:
             validate_safe_relative_path(relative_path)
 
             # Step 1: Check for existing identical content
-            existing_doc = self.catalog.get_document_by_derived_hash(parsed.derived_hash)
+            existing_doc = self.catalog.get_document_by_derived_hash(parsed["derived_hash"])
             if existing_doc is None:
                 # Check by binary SHA256
-                matching_files = self.catalog.find_files_by_hash(parsed.binary_sha256, active_only=True)
-                if matching_files and matching_files[0].canonical_doc_id:
-                    candidate = self.catalog.get_document(matching_files[0].canonical_doc_id)
+                matching_files = self.catalog.find_files_by_hash(parsed["binary_sha256"], active_only=True)
+                if matching_files and matching_files[0].get("canonical_doc_id"):
+                    candidate = self.catalog.get_document(matching_files[0]["canonical_doc_id"])
                     # Verify duplicate identity
-                    if candidate and matching_files[0].binary_sha256 == parsed.binary_sha256:
+                    if candidate and matching_files[0]["binary_sha256"] == parsed["binary_sha256"]:
                         existing_doc = candidate
 
-            if existing_doc is not None and existing_doc.lightrag_status == "PROCESSED":
+            if existing_doc is not None and existing_doc["lightrag_status"] == "PROCESSED":
                 # Verify that the document actually exists in LightRAG backend!
                 # Do not assume duplicate without server verification (§5)
-                server_doc = self.client.find_document_by_file_source(existing_doc.canonical_doc_id)
+                server_doc = self.client.find_document_by_file_source(existing_doc["canonical_doc_id"])
                 if server_doc is not None and str(server_doc.get("status", "")).upper() == "PROCESSED":
                     # Reuse canonical document! No new embeddings.
                     self.catalog.record_file(
                         source_id=source_id,
                         relative_path=relative_path,
-                        binary_sha256=parsed.binary_sha256,
+                        binary_sha256=parsed["binary_sha256"],
                         size=size,
                         mtime_ns=mtime_ns,
-                        canonical_doc_id=existing_doc.canonical_doc_id,
+                        canonical_doc_id=existing_doc["canonical_doc_id"],
                         active=True,
                     )
-                    return IndexResult(
+                    return create_index_result(
                         action="alias_reused",
-                        canonical_doc_id=existing_doc.canonical_doc_id,
+                        canonical_doc_id=existing_doc["canonical_doc_id"],
                         status="PROCESSED",
-                        lightrag_doc_id=existing_doc.lightrag_doc_id,
+                        lightrag_doc_id=existing_doc["lightrag_doc_id"],
                         reused=True,
                     )
                 else:
                     logger.warning(
                         "Documento '%s' presente nel catalogo ma assente o non PROCESSED su LightRAG. Reindicizzo...",
-                        existing_doc.canonical_doc_id,
+                        existing_doc["canonical_doc_id"],
                     )
 
             # Step 2: New canonical document
-            canonical_id = parsed.canonical_doc_id
+            canonical_id = parsed["canonical_doc_id"]
             artifact_str = str(artifact_path) if artifact_path else None
 
             self.catalog.upsert_document(
                 canonical_doc_id=canonical_id,
-                derived_hash=parsed.derived_hash,
+                derived_hash=parsed["derived_hash"],
                 extracted_artifact_path=artifact_str,
                 lightrag_status="PENDING",
-                parser_version=parsed.parser_version,
+                parser_version=parsed["parser_version"],
             )
 
             try:
                 insert_res = self.client.insert_text(
-                    text=parsed.text_content,
+                    text=parsed["text_content"],
                     file_source=canonical_id,
                 )
 
@@ -758,14 +709,14 @@ class ProtectedIndexer:
                 self.catalog.record_file(
                     source_id=source_id,
                     relative_path=relative_path,
-                    binary_sha256=parsed.binary_sha256,
+                    binary_sha256=parsed["binary_sha256"],
                     size=size,
                     mtime_ns=mtime_ns,
                     canonical_doc_id=canonical_id,
                     active=True,
                 )
 
-                return IndexResult(
+                return create_index_result(
                     action="indexed_new",
                     canonical_doc_id=canonical_id,
                     status="PROCESSED",
@@ -783,13 +734,13 @@ class ProtectedIndexer:
 
     def update_modified(
         self,
-        parsed: ParsedDocument,
+        parsed: dict[str, Any],
         source_id: str,
         relative_path: str,
         size: int,
         mtime_ns: int,
         artifact_path: Path | str | None = None,
-    ) -> IndexResult:
+    ) -> dict[str, Any]:
         """Update a modified file occurrence with recovery and alias protection (§5 Modify).
 
         Rules:
@@ -807,11 +758,11 @@ class ProtectedIndexer:
             validate_safe_relative_path(relative_path)
 
             old_file = self.catalog.get_file(source_id, relative_path)
-            if old_file is None or not old_file.canonical_doc_id:
+            if old_file is None or not old_file.get("canonical_doc_id"):
                 # File not previously tracked; route to index_new
                 return self.index_new(parsed, source_id, relative_path, size, mtime_ns, artifact_path)
 
-            old_canonical_id = old_file.canonical_doc_id
+            old_canonical_id = old_file["canonical_doc_id"]
             old_ref_count = self.catalog.get_document_reference_count(old_canonical_id, active_only=True)
             artifact_str = str(artifact_path) if artifact_path else None
 
@@ -824,41 +775,41 @@ class ProtectedIndexer:
                     old_canonical_id,
                     old_ref_count,
                 )
-                new_canonical_id = parsed.canonical_doc_id
+                new_canonical_id = parsed["canonical_doc_id"]
 
                 # Check if new content matches another existing document
-                existing_doc = self.catalog.get_document_by_derived_hash(parsed.derived_hash)
-                if existing_doc and existing_doc.lightrag_status == "PROCESSED":
-                    server_doc = self.client.find_document_by_file_source(existing_doc.canonical_doc_id)
+                existing_doc = self.catalog.get_document_by_derived_hash(parsed["derived_hash"])
+                if existing_doc and existing_doc["lightrag_status"] == "PROCESSED":
+                    server_doc = self.client.find_document_by_file_source(existing_doc["canonical_doc_id"])
                     if server_doc is not None and str(server_doc.get("status", "")).upper() == "PROCESSED":
                         self.catalog.record_file(
                             source_id=source_id,
                             relative_path=relative_path,
-                            binary_sha256=parsed.binary_sha256,
+                            binary_sha256=parsed["binary_sha256"],
                             size=size,
                             mtime_ns=mtime_ns,
-                            canonical_doc_id=existing_doc.canonical_doc_id,
+                            canonical_doc_id=existing_doc["canonical_doc_id"],
                             active=True,
                         )
-                        return IndexResult(
+                        return create_index_result(
                             action="updated_shared_reused",
-                            canonical_doc_id=existing_doc.canonical_doc_id,
+                            canonical_doc_id=existing_doc["canonical_doc_id"],
                             status="PROCESSED",
-                            lightrag_doc_id=existing_doc.lightrag_doc_id,
+                            lightrag_doc_id=existing_doc["lightrag_doc_id"],
                             reused=True,
                         )
 
                 # Insert new document into LightRAG
                 self.catalog.upsert_document(
                     canonical_doc_id=new_canonical_id,
-                    derived_hash=parsed.derived_hash,
+                    derived_hash=parsed["derived_hash"],
                     extracted_artifact_path=artifact_str,
                     lightrag_status="PENDING",
-                    parser_version=parsed.parser_version,
+                    parser_version=parsed["parser_version"],
                 )
 
                 try:
-                    self.client.insert_text(parsed.text_content, file_source=new_canonical_id)
+                    self.client.insert_text(parsed["text_content"], file_source=new_canonical_id)
                     doc_info = self.client.wait_for_processed(file_source=new_canonical_id)
                     lightrag_doc_id = doc_info.get("id")
 
@@ -870,13 +821,13 @@ class ProtectedIndexer:
                     self.catalog.record_file(
                         source_id=source_id,
                         relative_path=relative_path,
-                        binary_sha256=parsed.binary_sha256,
+                        binary_sha256=parsed["binary_sha256"],
                         size=size,
                         mtime_ns=mtime_ns,
                         canonical_doc_id=new_canonical_id,
                         active=True,
                     )
-                    return IndexResult(
+                    return create_index_result(
                         action="updated_shared_new",
                         canonical_doc_id=new_canonical_id,
                         status="PROCESSED",
@@ -898,13 +849,13 @@ class ProtectedIndexer:
             # Mandatory checkpoint validation (§5):
             # Checkpoint of previous derived content and mapping doc IDs is REQUIRED.
             # Old doc must NOT be deleted without a valid persistent checkpoint.
-            if not old_doc.extracted_artifact_path:
+            if not old_doc.get("extracted_artifact_path"):
                 raise CheckpointRequiredError(
                     f"Checkpoint obbligatorio fallito per '{relative_path}': "
                     f"nessun extracted_artifact_path nel catalogo per '{old_canonical_id}'."
                 )
 
-            old_art = Path(old_doc.extracted_artifact_path)
+            old_art = Path(old_doc["extracted_artifact_path"])
             if not old_art.is_file():
                 raise CheckpointRequiredError(
                     f"Checkpoint obbligatorio fallito per '{relative_path}': "
@@ -918,36 +869,36 @@ class ProtectedIndexer:
                     f"l'artifact derivato precedente '{old_art}' è vuoto."
                 )
 
-            if not parsed.text_content or not parsed.text_content.strip():
+            if not parsed["text_content"] or not parsed["text_content"].strip():
                 raise ValueError(
                     f"Contenuto del nuovo documento per '{relative_path}' vuoto o non valido."
                 )
 
-            checkpoint_lightrag_id = old_doc.lightrag_doc_id
+            checkpoint_lightrag_id = old_doc.get("lightrag_doc_id")
             target_old_doc_id = checkpoint_lightrag_id or old_canonical_id
-            new_canonical_id = parsed.canonical_doc_id
+            new_canonical_id = parsed["canonical_doc_id"]
             checkpoint_id = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
             # Create persistent checkpoint on disk BEFORE deleting old doc from LightRAG!
-            checkpoint = PersistentCheckpoint(
-                checkpoint_id=checkpoint_id,
-                stage="READY",
-                source_id=source_id,
-                relative_path=relative_path,
-                old_canonical_doc_id=old_canonical_id,
-                old_lightrag_doc_id=checkpoint_lightrag_id,
-                old_text_content=checkpoint_content,
-                old_derived_hash=old_doc.derived_hash,
-                old_artifact_path=old_doc.extracted_artifact_path,
-                old_binary_sha256=old_file.binary_sha256,
-                old_size=old_file.size,
-                old_mtime_ns=old_file.mtime_ns,
-                new_canonical_doc_id=new_canonical_id,
-                new_derived_hash=parsed.derived_hash,
-                new_artifact_path=artifact_str,
-                created_at=utc_now_iso(),
-                updated_at=utc_now_iso(),
-            )
+            checkpoint = {
+                "checkpoint_id": checkpoint_id,
+                "stage": "READY",
+                "source_id": source_id,
+                "relative_path": relative_path,
+                "old_canonical_doc_id": old_canonical_id,
+                "old_lightrag_doc_id": checkpoint_lightrag_id,
+                "old_text_content": checkpoint_content,
+                "old_derived_hash": old_doc.get("derived_hash"),
+                "old_artifact_path": old_doc.get("extracted_artifact_path"),
+                "old_binary_sha256": old_file["binary_sha256"],
+                "old_size": old_file["size"],
+                "old_mtime_ns": old_file["mtime_ns"],
+                "new_canonical_doc_id": new_canonical_id,
+                "new_derived_hash": parsed["derived_hash"],
+                "new_artifact_path": artifact_str,
+                "created_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            }
             self._save_checkpoint(checkpoint)
 
             # Entire mutation sequence is INSIDE try to guarantee recovery
@@ -964,15 +915,15 @@ class ProtectedIndexer:
                 self._update_checkpoint_stage(checkpoint, "CATALOG_PENDING")
                 self.catalog.upsert_document(
                     canonical_doc_id=new_canonical_id,
-                    derived_hash=parsed.derived_hash,
+                    derived_hash=parsed["derived_hash"],
                     extracted_artifact_path=artifact_str,
                     lightrag_status="PENDING",
-                    parser_version=parsed.parser_version,
+                    parser_version=parsed["parser_version"],
                 )
 
                 # 3. Insert new text in LightRAG
                 self._update_checkpoint_stage(checkpoint, "INSERTING_NEW")
-                self.client.insert_text(parsed.text_content, file_source=new_canonical_id)
+                self.client.insert_text(parsed["text_content"], file_source=new_canonical_id)
                 doc_info = self.client.wait_for_processed(file_source=new_canonical_id)
                 lightrag_doc_id = doc_info.get("id")
 
@@ -985,7 +936,7 @@ class ProtectedIndexer:
                 self.catalog.record_file(
                     source_id=source_id,
                     relative_path=relative_path,
-                    binary_sha256=parsed.binary_sha256,
+                    binary_sha256=parsed["binary_sha256"],
                     size=size,
                     mtime_ns=mtime_ns,
                     canonical_doc_id=new_canonical_id,
@@ -999,7 +950,7 @@ class ProtectedIndexer:
                 # Mark checkpoint completed / delete checkpoint file
                 self._remove_checkpoint(checkpoint)
 
-                return IndexResult(
+                return create_index_result(
                     action="updated_unshared",
                     canonical_doc_id=new_canonical_id,
                     status="PROCESSED",
@@ -1029,20 +980,20 @@ class ProtectedIndexer:
             if file_rec is None:
                 return {"action": "not_found", "relative_path": relative_path}
 
-            if not file_rec.active:
+            if not file_rec["active"]:
                 # Already inactive in catalog. Check if canonical doc is lingering unreferenced
-                canonical_id = file_rec.canonical_doc_id
+                canonical_id = file_rec.get("canonical_doc_id")
                 if canonical_id:
                     active_refs = self.catalog.get_document_reference_count(canonical_id, active_only=True)
                     if active_refs == 0:
                         doc_rec = self.catalog.get_document(canonical_id)
                         if doc_rec is not None:
-                            target_id = doc_rec.lightrag_doc_id or canonical_id
+                            target_id = doc_rec.get("lightrag_doc_id") or canonical_id
                             self.client.delete_documents([target_id])
                             self.catalog.delete_document_if_unreferenced(canonical_id)
                 return {"action": "already_inactive", "relative_path": relative_path}
 
-            canonical_id = file_rec.canonical_doc_id
+            canonical_id = file_rec.get("canonical_doc_id")
             if not canonical_id:
                 self.catalog.set_file_active(source_id, relative_path, False)
                 return {"action": "deactivated_no_doc", "relative_path": relative_path}
@@ -1068,7 +1019,7 @@ class ProtectedIndexer:
 
             # active_refs == 1: Sole reference. Must delete from LightRAG first!
             doc_rec = self.catalog.get_document(canonical_id)
-            target_id = (doc_rec.lightrag_doc_id if doc_rec else None) or canonical_id
+            target_id = (doc_rec.get("lightrag_doc_id") if doc_rec else None) or canonical_id
 
             # Delete from LightRAG backend BEFORE deactivating file in catalog
             del_ok = self.client.delete_documents([target_id])
@@ -1108,12 +1059,12 @@ class ProtectedIndexer:
                 "Rename '%s' -> '%s' (canonical doc: %s): 0 re-embeddings.",
                 old_relative_path,
                 new_relative_path,
-                renamed.canonical_doc_id,
+                renamed["canonical_doc_id"],
             )
             return {
                 "action": "renamed",
                 "source_id": source_id,
                 "old_relative_path": old_relative_path,
                 "new_relative_path": new_relative_path,
-                "canonical_doc_id": renamed.canonical_doc_id,
+                "canonical_doc_id": renamed["canonical_doc_id"],
             }

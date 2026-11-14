@@ -97,6 +97,20 @@ def is_relative_to(path: Path, parent: Path) -> bool:
         return False
 
 
+def create_kb_entry(name: str, source_dir: str, data_dir: str, derived_dir: str, rag_storage: str,
+                    port: int, exclude: list[str] | None = None) -> dict:
+    """Create a KB entry as a plain dict."""
+    return {
+        "name": name,
+        "source_dir": source_dir,
+        "data_dir": data_dir,
+        "derived_dir": derived_dir,
+        "rag_storage": rag_storage,
+        "port": port,
+        "exclude": list(exclude or []),
+    }
+
+
 def normalize_kb(entry: dict, env: dict[str, str] | None = None) -> dict:
     env = env or global_env()
     source_raw = entry.get("source_dir") or entry.get("source_folder")
@@ -107,29 +121,15 @@ def normalize_kb(entry: dict, env: dict[str, str] | None = None) -> dict:
     data_dir = Path(data_raw).expanduser().resolve() if data_raw else (source_dir / ".lightrag")
     derived_dir = Path(entry.get("derived_dir") or (data_dir / "derived")).expanduser().resolve()
     rag_storage = Path(entry.get("rag_storage") or (data_dir / "rag_storage")).expanduser().resolve()
-    return {
-        "name": entry["name"],
-        "source_dir": str(source_dir),
-        "data_dir": str(data_dir),
-        "derived_dir": str(derived_dir),
-        "rag_storage": str(rag_storage),
-        "port": int(entry.get("port") or env["BASE_PORT"]),
-        "exclude": list(entry.get("exclude", [])),
-    }
-
-
-def _registry_entry(kb: dict) -> dict:
-    entry = {
-        "name": kb["name"],
-        "source_dir": kb["source_dir"],
-        "data_dir": kb["data_dir"],
-        "derived_dir": kb["derived_dir"],
-        "rag_storage": kb["rag_storage"],
-        "port": int(kb["port"]),
-    }
-    if kb.get("exclude"):
-        entry["exclude"] = list(kb["exclude"])
-    return entry
+    return create_kb_entry(
+        name=entry["name"],
+        source_dir=str(source_dir),
+        data_dir=str(data_dir),
+        derived_dir=str(derived_dir),
+        rag_storage=str(rag_storage),
+        port=int(entry.get("port") or env["BASE_PORT"]),
+        exclude=entry.get("exclude", []),
+    )
 
 
 def load_registry(env: dict[str, str] | None = None) -> dict:
@@ -149,13 +149,32 @@ def save_registry(data: dict) -> None:
     REGISTRY.write_text(header + yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
 
 
+def _registry_entry(kb: dict) -> dict:
+    entry = {
+        "name": kb["name"],
+        "source_dir": kb["source_dir"],
+        "data_dir": kb["data_dir"],
+        "derived_dir": kb["derived_dir"],
+        "rag_storage": kb["rag_storage"],
+        "port": int(kb["port"]),
+    }
+    if kb.get("exclude"):
+        entry["exclude"] = list(kb["exclude"])
+    return entry
+
+
 def find_kb(registry: dict, name: str) -> dict | None:
-    return next((kb for kb in registry.get("kbs", []) if kb["name"] == name), None)
+    for kb in registry.get("kbs", []):
+        if kb["name"] == name:
+            return kb
+    return None
 
 
 def next_port(registry: dict, env: dict[str, str] | None = None) -> int:
     env = env or global_env()
-    used = {int(kb["port"]) for kb in registry.get("kbs", [])}
+    used = set()
+    for kb in registry.get("kbs", []):
+        used.add(int(kb["port"]))
     port = int(env["BASE_PORT"])
     while port in used:
         port += 1
@@ -277,7 +296,12 @@ def _folder_rule_matches(rel_dir: str, folder_spec: str) -> bool:
 def _ancestor_dirs(rel_path: str) -> list[str]:
     path = PurePosixPath(rel_path)
     parents = list(path.parents[:-1])
-    return [parent.as_posix() for parent in reversed(parents) if parent.as_posix() not in {".", ""}]
+    result: list[str] = []
+    for parent in reversed(parents):
+        p = parent.as_posix()
+        if p not in {".", ""}:
+            result.append(p)
+    return result
 
 
 def dir_is_excluded(rel_dir: str, specs: list[str]) -> bool:
@@ -287,8 +311,9 @@ def dir_is_excluded(rel_dir: str, specs: list[str]) -> bool:
         if not spec.endswith("/"):
             continue
         folder_spec = spec[:-1]
-        if any(_folder_rule_matches(candidate, folder_spec) for candidate in candidates):
-            return True
+        for candidate in candidates:
+            if _folder_rule_matches(candidate, folder_spec):
+                return True
     return False
 
 

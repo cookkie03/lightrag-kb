@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 
+from pipeline.ingestion_worker import create_staged_action, create_staged_job_manifest
 from pipeline.parsers import validate_safe_relative_path
 from sync.client import diff
 
@@ -14,13 +15,13 @@ def prepare_sync(catalog, kb_id, source_id, mode, job_id):
         raise ValueError("invalid sync identifiers or mode")
     with catalog.transaction():
         source = catalog.get_source(source_id)
-        if not source or source.status != "active" or not source.origin_host or not source.origin_folder:
+        if not source or source["status"] != "active" or not source["origin_host"] or not source["origin_folder"]:
             raise ValueError("unknown or unconfigured source")
-        if any(job.stage in {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING"} for job in catalog.list_jobs(kb_id=kb_id, limit=None)):
+        if any(job["stage"] in {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING"} for job in catalog.list_jobs(kb_id=kb_id, limit=None)):
             raise ValueError("another job is active")
         files = catalog.list_files(source_id=source_id)
         catalog.create_job(job_id, kb_id, source_id=source_id)
-        return {"job_id": job_id, "kb": kb_id, "source": source_id, "scan_generation": source.last_complete_scan_id, "origin_host": source.origin_host, "origin_folder": source.origin_folder, "deletion_policy": source.deletion_policy, "files": [{"path": f.relative_path, "sha256": f.binary_sha256, "size": f.size, "mtime_ns": f.mtime_ns} for f in files]}
+        return {"job_id": job_id, "kb": kb_id, "source": source_id, "scan_generation": source["last_complete_scan_id"], "origin_host": source["origin_host"], "origin_folder": source["origin_folder"], "deletion_policy": source["deletion_policy"], "files": [{"path": f["relative_path"], "sha256": f["binary_sha256"], "size": f["size"], "mtime_ns": f["mtime_ns"]} for f in files]}
 
 
 def validate_manifest(manifest, incoming):
@@ -71,17 +72,15 @@ def validate_manifest(manifest, incoming):
 
 def admit_manifest(catalog, job_id, manifest, incoming):
     """Bind a validated full snapshot and its delta to a registered source and job."""
-    from pipeline.ingestion_worker import StagedAction, StagedJobManifest
-
     job = catalog.get_job(job_id)
-    if not isinstance(manifest, dict) or not job or (manifest.get("job_id"), manifest.get("kb_id"), manifest.get("source_id")) != (job.job_id, job.kb_id, job.source_id):
+    if not isinstance(manifest, dict) or not job or (manifest.get("job_id"), manifest.get("kb_id"), manifest.get("source_id")) != (job["job_id"], job["kb_id"], job["source_id"]):
         raise ValueError("job identity mismatch")
-    source = catalog.get_source(job.source_id)
-    if not source or source.status != "active":
+    source = catalog.get_source(job["source_id"])
+    if not source or source["status"] != "active":
         raise ValueError("unknown or inactive source")
-    if not source.origin_host or not source.origin_folder or (manifest.get("origin_host"), manifest.get("origin_folder")) != (source.origin_host, source.origin_folder):
+    if not source["origin_host"] or not source["origin_folder"] or (manifest.get("origin_host"), manifest.get("origin_folder")) != (source["origin_host"], source["origin_folder"]):
         raise ValueError("source origin mismatch")
-    if "scan_generation" not in manifest or manifest["scan_generation"] != source.last_complete_scan_id:
+    if "scan_generation" not in manifest or manifest["scan_generation"] != source["last_complete_scan_id"]:
         raise ValueError("stale scan generation")
     validate_manifest(manifest, incoming)
     files = manifest.get("files")
@@ -100,7 +99,7 @@ def admit_manifest(catalog, job_id, manifest, incoming):
             raise ValueError("invalid snapshot metadata")
         seen.add(item["path"])
     # Recompute the delta from the catalog rather than trusting client actions.
-    previous = [{"path": f.relative_path, "sha256": f.binary_sha256} for f in catalog.list_files(source_id=source.id)]
+    previous = [{"path": f["relative_path"], "sha256": f["binary_sha256"]} for f in catalog.list_files(source_id=source["id"])]
     current = {item["path"]: item for item in files}
     plan = diff(previous, files, manifest["mode"] == "full" and manifest["scan_complete"] and not manifest["scan_errors"])
     expected = {(kind, path, None) for kind in ("add", "modify", "delete") for path in plan[kind]}
@@ -115,4 +114,19 @@ def admit_manifest(catalog, job_id, manifest, incoming):
                 raise ValueError("snapshot checksum mismatch")
             if (Path(incoming) / action["path"]).stat().st_size != item["size"]:
                 raise ValueError("snapshot size mismatch")
-    return StagedJobManifest(job_id, job.kb_id, source.id, mode="full_folder" if manifest["mode"] == "full" else "selected_files", scan_complete=manifest["scan_complete"], scan_errors=len(manifest["scan_errors"]), actions=[StagedAction(a["action"], a["path"], old_relative_path=a.get("old_path"), binary_sha256=current.get(a["path"], {}).get("sha256", ""), size=current.get(a["path"], {}).get("size", 0), mtime_ns=current.get(a["path"], {}).get("mtime_ns", 0)) for a in manifest["actions"]])
+    return create_staged_job_manifest(
+        job_id=job["job_id"],
+        kb_id=job["kb_id"],
+        source_id=source["id"],
+        mode="full_folder" if manifest["mode"] == "full" else "selected_files",
+        scan_complete=manifest["scan_complete"],
+        scan_errors=len(manifest["scan_errors"]),
+        actions=[create_staged_action(
+            action=a["action"],
+            path=a["path"],
+            old_relative_path=a.get("old_path"),
+            binary_sha256=current.get(a["path"], {}).get("sha256", ""),
+            size=current.get(a["path"], {}).get("size", 0),
+            mtime_ns=current.get(a["path"], {}).get("mtime_ns", 0)
+        ) for a in manifest["actions"]]
+    )

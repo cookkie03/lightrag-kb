@@ -84,3 +84,85 @@ def test_install_client_hook_claude_code():
         assert "hooks" in data
         assert "UserPromptSubmit" in data["hooks"]
         assert "my-kb" in data["hooks"]["UserPromptSubmit"][0]["command"]
+
+def test_install_client_hook_cursor():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proj_dir = Path(tmpdir)
+        res = install_client_hook("cursor", "my-kb", proj_dir)
+        assert res["status"] == "ok"
+        assert res["client"] == "cursor"
+        rules_file = proj_dir / ".cursor" / "rules" / "agent-memory.mdc"
+        assert rules_file.is_file()
+        assert res["configured_file"] == str(rules_file)
+
+        content = rules_file.read_text(encoding="utf-8")
+        assert "remember" in content
+        assert "search_memory" in content
+        assert "deprecate_memory" in content
+        assert "ragcli memory inject --kb my-kb" in content
+
+
+def test_install_client_hook_codex():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proj_dir = Path(tmpdir)
+        res = install_client_hook("codex", "my-kb", proj_dir)
+        assert res["status"] == "ok"
+        assert res["client"] == "codex"
+        instructions_file = proj_dir / ".codex" / "instructions.md"
+        assert instructions_file.is_file()
+        assert res["configured_file"] == str(instructions_file)
+
+        content = instructions_file.read_text(encoding="utf-8")
+        assert "ragcli memory" in content
+        assert "my-kb" in content
+
+        # Verify appending when file already exists
+        res2 = install_client_hook("codex", "other-kb", proj_dir)
+        assert res2["status"] == "ok"
+        content_after = instructions_file.read_text(encoding="utf-8")
+        assert "my-kb" in content_after
+        assert "other-kb" in content_after
+
+
+def test_install_client_hook_antigravity():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proj_dir = Path(tmpdir)
+        res = install_client_hook("antigravity", "my-kb", proj_dir)
+        assert res["status"] == "ok"
+        assert res["client"] == "antigravity"
+        gemini_file = proj_dir / ".gemini" / "GEMINI.md"
+        assert gemini_file.is_file()
+        assert res["configured_file"] == str(gemini_file)
+
+        content = gemini_file.read_text(encoding="utf-8")
+        assert "ragcli memory recall" in content
+        assert "ragcli memory inject" in content
+        assert "my-kb" in content
+
+
+def test_mcp_cursor_add_and_remove():
+    from bin.mcp_clients import CLIENTS, REMOVERS, add_cursor, remove_cursor
+
+    assert "cursor" in CLIENTS
+    assert "cursor" in REMOVERS
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        proj_dir = Path(tmpdir)
+        py = Path("/usr/bin/python3")
+        script = Path("/path/to/server.py")
+
+        rc = add_cursor("lightrag-test", py, script, "test-kb", False, source_folder=proj_dir)
+        assert rc == 0
+        cfg_file = proj_dir / ".cursor" / "mcp.json"
+        assert cfg_file.is_file()
+
+        data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert "lightrag-test" in data.get("mcpServers", {})
+        assert data["mcpServers"]["lightrag-test"]["args"] == [str(script), "--kb", "test-kb"]
+
+        # Verify removal
+        rc_rm = remove_cursor("lightrag-test", source_folder=proj_dir)
+        assert rc_rm == 0
+        data_after = json.loads(cfg_file.read_text(encoding="utf-8"))
+        assert "lightrag-test" not in data_after.get("mcpServers", {})
+        assert (proj_dir / ".cursor" / "mcp.json.bak").is_file()

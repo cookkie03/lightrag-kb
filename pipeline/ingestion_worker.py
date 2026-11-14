@@ -23,7 +23,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,7 +31,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pipeline.indexer import (
-    IndexResult,
     KBLockedError,
     LightRAGClient,
     ProtectedIndexer,
@@ -40,14 +38,13 @@ from pipeline.indexer import (
     RecoverySucceededError,
 )
 from pipeline.parsers import (
-    ParsedDocument,
     SafePathError,
     compute_file_sha256,
     parse_document,
     save_derived_artifacts,
     validate_safe_relative_path,
 )
-from storage.catalog import Catalog, JobRecord
+from storage.catalog import Catalog
 
 logger = logging.getLogger("pipeline.ingestion_worker")
 if not logger.handlers:
@@ -69,71 +66,48 @@ class SafetyGuardViolationError(IngestionWorkerError):
     """Raised when deletion safety thresholds or push restrictions are violated (§5)."""
 
 
-@dataclass
-class StagedAction:
-    """Action descriptor for a single file within a sync job."""
+def create_staged_action(
+    action: str,
+    relative_path: str,
+    old_relative_path: str | None = None,
+    binary_sha256: str = "",
+    size: int = 0,
+    mtime_ns: int = 0,
+    staged_filename: str | None = None,
+) -> dict[str, Any]:
+    """Create a staged action as a plain dict."""
+    return {
+        "action": action,
+        "relative_path": relative_path,
+        "old_relative_path": old_relative_path,
+        "binary_sha256": binary_sha256,
+        "size": size,
+        "mtime_ns": mtime_ns,
+        "staged_filename": staged_filename,
+    }
 
-    action: str  # "add", "modify", "rename", "delete"
-    relative_path: str
-    old_relative_path: str | None = None
-    binary_sha256: str = ""
-    size: int = 0
-    mtime_ns: int = 0
-    staged_filename: str | None = None
 
-    # Serialize the action and its staging metadata for the manifest.
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass
-class StagedJobManifest:
-    """Staged sync job manifest emitted by Mac client or ragcli sync prepare (§4)."""
-
-    job_id: str
-    kb_id: str
-    source_id: str
-    scan_id: str | None = None
-    mode: str = "full_folder"  # "full_folder" or "selected_files"
-    scan_complete: bool = True
-    scan_errors: int = 0
-    actions: list[StagedAction] = field(default_factory=list)
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> StagedJobManifest:
-        """Reject ambiguous scan status rather than treating it as complete."""
-        if type(data.get("scan_complete")) is not bool or type(data.get("scan_errors")) is not int or data["scan_errors"] < 0:
-            raise ValueError("invalid scan status")
-        raw_actions = data.get("actions") or data.get("files") or []
-        parsed_actions = [
-            StagedAction(
-                action=a["action"],
-                relative_path=a["relative_path"],
-                old_relative_path=a.get("old_relative_path"),
-                binary_sha256=a.get("binary_sha256", ""),
-                size=int(a.get("size", 0)),
-                mtime_ns=int(a.get("mtime_ns", 0)),
-                staged_filename=a.get("staged_filename"),
-            )
-            for a in raw_actions
-        ]
-        return cls(
-            job_id=data["job_id"],
-            kb_id=data["kb_id"],
-            source_id=data["source_id"],
-            scan_id=data.get("scan_id"),
-            mode=data.get("mode", "full_folder"),
-            scan_complete=bool(data.get("scan_complete", True)),
-            scan_errors=int(data.get("scan_errors", 0)),
-            actions=parsed_actions,
-        )
-
-    # Load JSON through the same scan-status validation as in-memory manifests.
-    @classmethod
-    def load_from_file(cls, path: Path | str) -> StagedJobManifest:
-        p = Path(path)
-        data = json.loads(p.read_text(encoding="utf-8"))
-        return cls.from_dict(data)
+def create_staged_job_manifest(
+    job_id: str,
+    kb_id: str,
+    source_id: str,
+    scan_id: str | None = None,
+    mode: str = "full_folder",
+    scan_complete: bool = True,
+    scan_errors: int = 0,
+    actions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Create a staged job manifest as a plain dict."""
+    return {
+        "job_id": job_id,
+        "kb_id": kb_id,
+        "source_id": source_id,
+        "scan_id": scan_id,
+        "mode": mode,
+        "scan_complete": scan_complete,
+        "scan_errors": scan_errors,
+        "actions": actions or [],
+    }
 
 
 class IngestionWorker:
@@ -167,9 +141,9 @@ class IngestionWorker:
         active_stages = {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING"}
         jobs = self.catalog.list_jobs(kb_id=kb_id, limit=None)
         for j in jobs:
-            if j.job_id != current_job_id and j.stage in active_stages:
+            if j["job_id"] != current_job_id and j["stage"] in active_stages:
                 raise JobLockedError(
-                    f"Job '{j.job_id}' è attualmente attivo ({j.stage}) per la KB '{kb_id}'. "
+                    f"Job '{j['job_id']}' è attualmente attivo ({j['stage']}) per la KB '{kb_id}'. "
                     f"È consentito un solo writer per KB."
                 )
 
@@ -178,14 +152,14 @@ class IngestionWorker:
         active_stages = {"PREPARING", "TRANSFERRING", "VALIDATING", "PROCESSING"}
         jobs = self.catalog.list_jobs(source_id=source_id, limit=None)
         for j in jobs:
-            if j.job_id != current_job_id and j.stage in active_stages:
+            if j["job_id"] != current_job_id and j["stage"] in active_stages:
                 raise JobLockedError(
-                    f"Job '{j.job_id}' è attualmente attivo ({j.stage}) per la sorgente '{source_id}'."
+                    f"Job '{j['job_id']}' è attualmente attivo ({j['stage']}) per la sorgente '{source_id}'."
                 )
 
     def validate_safety_guards(
         self,
-        manifest: StagedJobManifest,
+        manifest: dict[str, Any],
     ) -> tuple[bool, str | None]:
         """Validate delete safety guards according to §5.
 
@@ -197,26 +171,26 @@ class IngestionWorker:
         - Suspicious empty root: 0 active files remaining when catalog has files ->
           NEEDS_REVIEW.
         """
-        delete_actions = [a for a in manifest.actions if a.action == "delete"]
+        delete_actions = [a for a in manifest["actions"] if a["action"] == "delete"]
         if not delete_actions:
             return True, None
 
-        source = self.catalog.get_source(manifest.source_id)
+        source = self.catalog.get_source(manifest["source_id"])
         if source is None:
-            return False, f"Sorgente sconosciuta: {manifest.source_id}."
-        if source.deletion_policy != "guarded":
-            return False, f"Policy di cancellazione disabilitata ('{source.deletion_policy}') per sorgente {manifest.source_id}."
+            return False, f"Sorgente sconosciuta: {manifest['source_id']}."
+        if source["deletion_policy"] != "guarded":
+            return False, f"Policy di cancellazione disabilitata ('{source['deletion_policy']}') per sorgente {manifest['source_id']}."
 
         # Guard 1: Push / partial scan cannot delete
-        if manifest.mode != "full_folder":
+        if manifest["mode"] != "full_folder":
             return False, "La modalità push (selected_files) non autorizza delezioni."
-        if not manifest.scan_complete:
+        if not manifest["scan_complete"]:
             return False, "Scansione incompleta: delezioni automatiche bloccate per sicurezza."
-        if manifest.scan_errors > 0:
-            return False, f"La scansione ha registrato {manifest.scan_errors} errori: delezioni bloccate."
+        if manifest["scan_errors"] > 0:
+            return False, f"La scansione ha registrato {manifest['scan_errors']} errori: delezioni bloccate."
 
         # Guard 2: High deletion threshold (>20% or >100 files)
-        active_files = self.catalog.list_files(source_id=manifest.source_id, active_only=True)
+        active_files = self.catalog.list_files(source_id=manifest["source_id"], active_only=True)
         total_active = len(active_files)
         del_count = len(delete_actions)
 
@@ -230,7 +204,7 @@ class IngestionWorker:
 
         # Guard 3: Suspicious empty root / offline host
         # If all currently active files are being deleted at once and no adds exist
-        non_delete_count = sum(1 for a in manifest.actions if a.action in ("add", "modify", "rename"))
+        non_delete_count = sum(1 for a in manifest["actions"] if a["action"] in ("add", "modify", "rename"))
         if total_active > 0 and non_delete_count == 0 and del_count == total_active:
             return False, (
                 "Cartella vuota in modo sospetto o host sorgente offline: "
@@ -242,8 +216,8 @@ class IngestionWorker:
     def process_job(
         self,
         job_id: str,
-        manifest: StagedJobManifest | None = None,
-    ) -> JobRecord:
+        manifest: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Execute a staged job from start to finish (§4, §5)."""
         job = self.catalog.get_job(job_id)
         if job is None:
@@ -253,7 +227,7 @@ class IngestionWorker:
         if not job_id or job_id in {".", ".."} or Path(job_id).name != job_id or "\\" in job_id:
             return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Invalid job identifier")
 
-        if job.stage == "COMPLETED":
+        if job["stage"] == "COMPLETED":
             logger.info("Job '%s' già completato (idempotente).", job_id)
             return job
 
@@ -271,17 +245,17 @@ class IngestionWorker:
             except (OSError, ValueError, SafePathError) as exc:
                 return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=str(exc))
 
-        if manifest is not None and (manifest.job_id, manifest.kb_id, manifest.source_id) != (job.job_id, job.kb_id, job.source_id):
+        if manifest is not None and (manifest["job_id"], manifest["kb_id"], manifest["source_id"]) != (job["job_id"], job["kb_id"], job["source_id"]):
             return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Manifest identity does not match job")
 
-        source_id = job.source_id
-        kb_id = job.kb_id
+        source_id = job["source_id"]
+        kb_id = job["kb_id"]
 
         # Acquire KB-level single-writer lock (§5: 'un solo writer per KB')
         with self.kb_lock:
             # Another worker may have completed this job while we waited.
             job = self.catalog.get_job(job_id)
-            if job.stage == "COMPLETED":
+            if job["stage"] == "COMPLETED":
                 return job
             # Step 1: Verify catalog locks for KB and source
             self.acquire_kb_lock(kb_id, job_id)
@@ -298,15 +272,15 @@ class IngestionWorker:
                     return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=str(exc))
 
             # Step 2: Validate safe sandboxed paths across all manifest actions (§11 #10)
-            for act in manifest.actions:
-                if act.action not in {"add", "modify", "rename", "delete"}:
-                    return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=f"Unknown action: {act.action}")
+            for act in manifest["actions"]:
+                if act["action"] not in {"add", "modify", "rename", "delete"}:
+                    return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary=f"Unknown action: {act['action']}")
                 try:
-                    validate_safe_relative_path(act.relative_path)
-                    if act.old_relative_path:
-                        validate_safe_relative_path(act.old_relative_path)
-                    if act.staged_filename:
-                        validate_safe_relative_path(act.staged_filename)
+                    validate_safe_relative_path(act["relative_path"])
+                    if act.get("old_relative_path"):
+                        validate_safe_relative_path(act["old_relative_path"])
+                    if act.get("staged_filename"):
+                        validate_safe_relative_path(act["staged_filename"])
                 except SafePathError as path_err:
                     err_msg = f"Violazione di sicurezza percorso nel manifest: {path_err}"
                     logger.error(err_msg)
@@ -353,28 +327,28 @@ class IngestionWorker:
             )
 
             source_rec = self.catalog.get_source(source_id)
-            source_origin = source_rec.origin_folder if source_rec else ""
-            source_host = source_rec.origin_host if source_rec else ""
+            source_origin = source_rec["origin_folder"] if source_rec else ""
+            source_host = source_rec["origin_host"] if source_rec else ""
 
             # Process deletes last and only after every other action succeeds.
             # A failed upload or indexing operation must never imply a deletion.
-            actions = sorted(manifest.actions, key=lambda item: item.action == "delete")
+            actions = sorted(manifest["actions"], key=lambda item: item["action"] == "delete")
             for item in actions:
-                if item.action == "delete" and counters["failed"]:
+                if item["action"] == "delete" and counters["failed"]:
                     continue
-                rel_path = item.relative_path
+                rel_path = item["relative_path"]
                 source_uri = f"{source_host}:{source_origin}/{rel_path}".lstrip(":")
 
                 try:
                     # ---------------------------------------------------------
                     # ACTION: RENAME
                     # ---------------------------------------------------------
-                    if item.action == "rename":
-                        if not item.old_relative_path:
+                    if item["action"] == "rename":
+                        if not item.get("old_relative_path"):
                             raise ValueError(f"Rename su '{rel_path}' senza old_relative_path specificato")
                         self.indexer.rename_file(
                             source_id=source_id,
-                            old_relative_path=item.old_relative_path,
+                            old_relative_path=item["old_relative_path"],
                             new_relative_path=rel_path,
                         )
                         counters["renamed"] += 1
@@ -383,7 +357,7 @@ class IngestionWorker:
                     # ---------------------------------------------------------
                     # ACTION: DELETE (§5 Retry-safe Deletions)
                     # ---------------------------------------------------------
-                    if item.action == "delete":
+                    if item["action"] == "delete":
                         del_res = self.indexer.delete_file(source_id, rel_path)
                         if del_res.get("action") != "already_inactive":
                             counters["deleted"] += 1
@@ -394,8 +368,8 @@ class IngestionWorker:
                     # ---------------------------------------------------------
                     # Locate raw input file
                     staged_path: Path | None = None
-                    if item.staged_filename and staging_incoming:
-                        candidate_file = staging_incoming / item.staged_filename
+                    if item.get("staged_filename") and staging_incoming:
+                        candidate_file = staging_incoming / item["staged_filename"]
                         if candidate_file.is_file():
                             staged_path = candidate_file
                     elif staging_incoming and (staging_incoming / rel_path).exists():
@@ -409,10 +383,10 @@ class IngestionWorker:
                         raise SafePathError("Staging directory is required")
                     validate_safe_relative_path(staged_path.relative_to(staging_incoming), base_dir=staging_incoming, allow_symlinks=False)
 
-                    file_size = item.size or staged_path.stat().st_size
-                    mtime_ns = item.mtime_ns or staged_path.stat().st_mtime_ns
+                    file_size = item.get("size") or staged_path.stat().st_size
+                    mtime_ns = item.get("mtime_ns") or staged_path.stat().st_mtime_ns
                     b_sha = compute_file_sha256(staged_path)
-                    if item.binary_sha256 and item.binary_sha256 != b_sha:
+                    if item.get("binary_sha256") and item["binary_sha256"] != b_sha:
                         raise ValueError(f"Checksum mismatch for '{rel_path}'")
 
                     # Parse document via pipeline.parsers
@@ -426,7 +400,7 @@ class IngestionWorker:
 
                     # Keep modified artifacts versioned so recovery can still read the old file.
                     artifact_rel_path = rel_path
-                    if item.action == "modify":
+                    if item["action"] == "modify":
                         artifact_rel_path = f".updates/{job_id}/{rel_path}"
 
                     # Persist derived markdown and JSON sidecar (§7)
@@ -437,7 +411,7 @@ class IngestionWorker:
                         source_uri=source_uri,
                     )
 
-                    if item.action == "add":
+                    if item["action"] == "add":
                         idx_res = self.indexer.index_new(
                             parsed=parsed,
                             source_id=source_id,
@@ -446,12 +420,12 @@ class IngestionWorker:
                             mtime_ns=mtime_ns,
                             artifact_path=md_path,
                         )
-                        if idx_res.reused:
+                        if idx_res.get("reused"):
                             counters["unchanged"] += 1
                         else:
                             counters["added"] += 1
 
-                    elif item.action == "modify":
+                    elif item["action"] == "modify":
                         idx_res = self.indexer.update_modified(
                             parsed=parsed,
                             source_id=source_id,
@@ -460,7 +434,7 @@ class IngestionWorker:
                             mtime_ns=mtime_ns,
                             artifact_path=md_path,
                         )
-                        if idx_res.reused:
+                        if idx_res.get("reused"):
                             counters["unchanged"] += 1
                         else:
                             counters["modified"] += 1
@@ -505,8 +479,8 @@ class IngestionWorker:
                 except OSError as cleanup_err:
                     logger.debug("Impossibile rimuovere file staged %s: %s", v_file, cleanup_err)
 
-            if final_stage == "COMPLETED" and manifest.mode == "full_folder" and manifest.scan_complete and manifest.scan_errors == 0:
-                scan_id = manifest.scan_id or job_id
+            if final_stage == "COMPLETED" and manifest["mode"] == "full_folder" and manifest["scan_complete"] and manifest["scan_errors"] == 0:
+                scan_id = manifest.get("scan_id") or job_id
                 self.catalog.update_source_scan(source_id, scan_id)
 
             updated_job = self.catalog.update_job(

@@ -51,14 +51,15 @@ from pipeline.indexer import (
     RecoverySucceededError,
     TransientConflictError,
     UnverifiedDuplicateError,
+    create_index_result,
 )
 from pipeline.ingestion_worker import (
     IngestionWorker,
     JobLockedError,
-    StagedAction,
-    StagedJobManifest,
+    create_staged_action,
+    create_staged_job_manifest,
 )
-from pipeline.parsers import ParsedDocument, parse_document
+from pipeline.parsers import parse_document
 from storage.catalog import Catalog
 
 
@@ -283,41 +284,45 @@ def test_protected_indexer_add_new_and_alias_reuse(memory_catalog: Catalog, mock
     indexer = ProtectedIndexer(cat, client, derived_dir=tmp_path / "derived")
 
     # 1. Index new file: folderA/guide.md
-    parsed1 = ParsedDocument(
-        canonical_doc_id="doc_abc123",
-        category="text",
-        text_content="# Guide\nContent of guide.",
-        binary_sha256="abc123sha",
-        derived_hash="derived_hash_1",
-        parser_name="text_plain",
-        parser_version="text-v1",
-    )
+    parsed1 = {
+        "canonical_doc_id": "doc_abc123",
+        "category": "text",
+        "text_content": "# Guide\nContent of guide.",
+        "binary_sha256": "abc123sha",
+        "derived_hash": "derived_hash_1",
+        "parser_name": "text_plain",
+        "parser_version": "text-v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     res1 = indexer.index_new(parsed1, "src1", "folderA/guide.md", 100, 1000)
-    assert res1.action == "indexed_new"
-    assert res1.status == "PROCESSED"
-    assert res1.reused is False
+    assert res1["action"] == "indexed_new"
+    assert res1["status"] == "PROCESSED"
+    assert res1["reused"] is False
 
     # Verify catalog
     doc_rec = cat.get_document("doc_abc123")
     assert doc_rec is not None
-    assert doc_rec.lightrag_status == "PROCESSED"
-    assert doc_rec.reference_count == 1
+    assert doc_rec["lightrag_status"] == "PROCESSED"
+    assert doc_rec["reference_count"] == 1
 
     # 2. Index identical content with different path: folderB/copy_guide.md (§5 Alias Reuse)
-    parsed2 = ParsedDocument(
-        canonical_doc_id="doc_abc123",
-        category="text",
-        text_content="# Guide\nContent of guide.",
-        binary_sha256="abc123sha",
-        derived_hash="derived_hash_1",
-        parser_name="text_plain",
-        parser_version="text-v1",
-    )
+    parsed2 = {
+        "canonical_doc_id": "doc_abc123",
+        "category": "text",
+        "text_content": "# Guide\nContent of guide.",
+        "binary_sha256": "abc123sha",
+        "derived_hash": "derived_hash_1",
+        "parser_name": "text_plain",
+        "parser_version": "text-v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     insert_calls_before = len([c for c in mock_session.call_history if c.get("method") == "POST" and "/documents/text" in c.get("url")])
 
     res2 = indexer.index_new(parsed2, "src1", "folderB/copy_guide.md", 100, 1000)
-    assert res2.action == "alias_reused"
-    assert res2.reused is True
+    assert res2["action"] == "alias_reused"
+    assert res2["reused"] is True
 
     insert_calls_after = len([c for c in mock_session.call_history if c.get("method") == "POST" and "/documents/text" in c.get("url")])
     # ZERO new insert calls to LightRAG!
@@ -341,15 +346,17 @@ def test_protected_indexer_modify_unshared_with_recovery(memory_catalog: Catalog
     old_art.parent.mkdir(parents=True, exist_ok=True)
     old_art.write_text("Old Version Text", encoding="utf-8")
 
-    parsed_old = ParsedDocument(
-        canonical_doc_id="doc_v1",
-        category="text",
-        text_content="Old Version Text",
-        binary_sha256="sha_v1",
-        derived_hash="d_hash_v1",
-        parser_name="text",
-        parser_version="v1",
-    )
+    parsed_old = {
+        "canonical_doc_id": "doc_v1",
+        "category": "text",
+        "text_content": "Old Version Text",
+        "binary_sha256": "sha_v1",
+        "derived_hash": "d_hash_v1",
+        "parser_name": "text",
+        "parser_version": "v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     indexer.index_new(parsed_old, "src1", "doc.md", 50, 100, artifact_path=old_art)
     assert cat.get_document_reference_count("doc_v1") == 1
 
@@ -358,15 +365,17 @@ def test_protected_indexer_modify_unshared_with_recovery(memory_catalog: Catalog
 
     new_art = derived_dir / "text" / "file_new.md"
     new_art.write_text("New Corrupt Version", encoding="utf-8")
-    parsed_new = ParsedDocument(
-        canonical_doc_id="doc_v2",
-        category="text",
-        text_content="New Corrupt Version",
-        binary_sha256="sha_v2",
-        derived_hash="d_hash_v2",
-        parser_name="text",
-        parser_version="v1",
-    )
+    parsed_new = {
+        "canonical_doc_id": "doc_v2",
+        "category": "text",
+        "text_content": "New Corrupt Version",
+        "binary_sha256": "sha_v2",
+        "derived_hash": "d_hash_v2",
+        "parser_name": "text",
+        "parser_version": "v1",
+        "metadata": {},
+        "sidecar": {},
+    }
 
     # Update should fail AND trigger recovery from old checkpoint!
     with pytest.raises(RecoverySucceededError, match="recovery da checkpoint ha ripristinato"):
@@ -374,9 +383,9 @@ def test_protected_indexer_modify_unshared_with_recovery(memory_catalog: Catalog
 
     # Verify that previous state was restored in catalog
     file_rec = cat.get_file("src1", "doc.md")
-    assert file_rec.canonical_doc_id == "doc_v1"
+    assert file_rec["canonical_doc_id"] == "doc_v1"
     doc_rec = cat.get_document("doc_v1")
-    assert doc_rec.lightrag_status == "PROCESSED"
+    assert doc_rec["lightrag_status"] == "PROCESSED"
 
 
 def test_protected_indexer_modify_shared_alias_protection(memory_catalog: Catalog, mock_session, tmp_path: Path):
@@ -387,40 +396,44 @@ def test_protected_indexer_modify_shared_alias_protection(memory_catalog: Catalo
     indexer = ProtectedIndexer(cat, client, derived_dir=tmp_path / "derived")
 
     # Add shared doc with 2 occurrences: fileA and fileB
-    parsed_shared = ParsedDocument(
-        canonical_doc_id="doc_shared",
-        category="text",
-        text_content="Shared Document Text",
-        binary_sha256="sha_shared",
-        derived_hash="d_shared",
-        parser_name="text",
-        parser_version="v1",
-    )
+    parsed_shared = {
+        "canonical_doc_id": "doc_shared",
+        "category": "text",
+        "text_content": "Shared Document Text",
+        "binary_sha256": "sha_shared",
+        "derived_hash": "d_shared",
+        "parser_name": "text",
+        "parser_version": "v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     indexer.index_new(parsed_shared, "src1", "fileA.md", 100, 1000)
     indexer.index_new(parsed_shared, "src1", "fileB.md", 100, 1000)
     assert cat.get_document_reference_count("doc_shared") == 2
 
     # Now modify fileA to new content
-    parsed_a_new = ParsedDocument(
-        canonical_doc_id="doc_a_unique",
-        category="text",
-        text_content="Unique File A Content",
-        binary_sha256="sha_a_unique",
-        derived_hash="d_a_unique",
-        parser_name="text",
-        parser_version="v1",
-    )
+    parsed_a_new = {
+        "canonical_doc_id": "doc_a_unique",
+        "category": "text",
+        "text_content": "Unique File A Content",
+        "binary_sha256": "sha_a_unique",
+        "derived_hash": "d_a_unique",
+        "parser_name": "text",
+        "parser_version": "v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     res = indexer.update_modified(parsed_a_new, "src1", "fileA.md", 150, 2000)
-    assert res.action == "updated_shared_new"
-    assert res.canonical_doc_id == "doc_a_unique"
+    assert res["action"] == "updated_shared_new"
+    assert res["canonical_doc_id"] == "doc_a_unique"
 
     # fileA now points to doc_a_unique
     f_a = cat.get_file("src1", "fileA.md")
-    assert f_a.canonical_doc_id == "doc_a_unique"
+    assert f_a["canonical_doc_id"] == "doc_a_unique"
 
     # fileB STILL points to doc_shared! Old doc was NOT deleted from LightRAG!
     f_b = cat.get_file("src1", "fileB.md")
-    assert f_b.canonical_doc_id == "doc_shared"
+    assert f_b["canonical_doc_id"] == "doc_shared"
     assert "doc_shared" in mock_session.documents
     assert cat.get_document_reference_count("doc_shared") == 1
 
@@ -432,15 +445,17 @@ def test_protected_indexer_delete_shared_alias_protection(memory_catalog: Catalo
     client = LightRAGClient(port=9621, session=mock_session)
     indexer = ProtectedIndexer(cat, client, derived_dir=tmp_path / "derived")
 
-    parsed = ParsedDocument(
-        canonical_doc_id="doc_common",
-        category="text",
-        text_content="Common Text",
-        binary_sha256="sha_common",
-        derived_hash="d_common",
-        parser_name="text",
-        parser_version="v1",
-    )
+    parsed = {
+        "canonical_doc_id": "doc_common",
+        "category": "text",
+        "text_content": "Common Text",
+        "binary_sha256": "sha_common",
+        "derived_hash": "d_common",
+        "parser_name": "text",
+        "parser_version": "v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     indexer.index_new(parsed, "src1", "file1.md", 100, 100)
     indexer.index_new(parsed, "src1", "file2.md", 100, 100)
 
@@ -464,15 +479,17 @@ def test_protected_indexer_rename_zero_reembeddings(memory_catalog: Catalog, moc
     client = LightRAGClient(port=9621, session=mock_session)
     indexer = ProtectedIndexer(cat, client, derived_dir=tmp_path / "derived")
 
-    parsed = ParsedDocument(
-        canonical_doc_id="doc_move",
-        category="text",
-        text_content="Text to move",
-        binary_sha256="sha_move",
-        derived_hash="d_move",
-        parser_name="text",
-        parser_version="v1",
-    )
+    parsed = {
+        "canonical_doc_id": "doc_move",
+        "category": "text",
+        "text_content": "Text to move",
+        "binary_sha256": "sha_move",
+        "derived_hash": "d_move",
+        "parser_name": "text",
+        "parser_version": "v1",
+        "metadata": {},
+        "sidecar": {},
+    }
     indexer.index_new(parsed, "src1", "old/path.md", 100, 100)
 
     calls_before = len(mock_session.call_history)
@@ -482,7 +499,7 @@ def test_protected_indexer_rename_zero_reembeddings(memory_catalog: Catalog, moc
     assert res["action"] == "renamed"
     assert calls_after == calls_before  # ZERO calls to LightRAG
     assert cat.get_file("src1", "old/path.md") is None
-    assert cat.get_file("src1", "new/path.md").canonical_doc_id == "doc_move"
+    assert cat.get_file("src1", "new/path.md")["canonical_doc_id"] == "doc_move"
 
 
 # -----------------------------------------------------------------------------
@@ -502,7 +519,7 @@ def test_ingestion_worker_source_lock(memory_catalog: Catalog, mock_session, tmp
 
     # Attempt to run worker for job 2 on same source -> locked!
     cat.create_job("job_2", kb_id="kb1", source_id="src_locked", stage="PREPARING")
-    manifest = StagedJobManifest(job_id="job_2", kb_id="kb1", source_id="src_locked")
+    manifest = create_staged_job_manifest(job_id="job_2", kb_id="kb1", source_id="src_locked")
 
     with pytest.raises(JobLockedError, match="è attualmente attivo"):
         worker.process_job("job_2", manifest)
@@ -518,17 +535,17 @@ def test_ingestion_worker_safety_guard_blocks_push_delete(memory_catalog: Catalo
     cat.create_job("job_push", kb_id="kb1", source_id="src1", stage="PREPARING")
 
     # Selected files (push) mode with a delete action
-    manifest = StagedJobManifest(
+    manifest = create_staged_job_manifest(
         job_id="job_push",
         kb_id="kb1",
         source_id="src1",
         mode="selected_files",
-        actions=[StagedAction(action="delete", relative_path="some_file.md")],
+        actions=[create_staged_action(action="delete", relative_path="some_file.md")],
     )
 
     job = worker.process_job("job_push", manifest)
-    assert job.stage == "NEEDS_REVIEW"
-    assert "push" in job.error_summary
+    assert job["stage"] == "NEEDS_REVIEW"
+    assert "push" in job["error_summary"]
 
 
 def test_ingestion_worker_safety_guard_high_delete_threshold(memory_catalog: Catalog, mock_session, tmp_path: Path):
@@ -545,8 +562,8 @@ def test_ingestion_worker_safety_guard_high_delete_threshold(memory_catalog: Cat
     cat.create_job("job_del_high", kb_id="kb1", source_id="src1", stage="PREPARING")
 
     # Attempt to delete 5 out of 10 files (50% > 20% limit)
-    actions = [StagedAction(action="delete", relative_path=f"file_{i}.txt") for i in range(5)]
-    manifest = StagedJobManifest(
+    actions = [create_staged_action(action="delete", relative_path=f"file_{i}.txt") for i in range(5)]
+    manifest = create_staged_job_manifest(
         job_id="job_del_high",
         kb_id="kb1",
         source_id="src1",
@@ -555,8 +572,8 @@ def test_ingestion_worker_safety_guard_high_delete_threshold(memory_catalog: Cat
     )
 
     job = worker.process_job("job_del_high", manifest)
-    assert job.stage == "NEEDS_REVIEW"
-    assert "> 20%" in job.error_summary
+    assert job["stage"] == "NEEDS_REVIEW"
+    assert "> 20%" in job["error_summary"]
 
     # Ensure none of the files were actually deleted
     assert len(cat.list_files("src1", active_only=True)) == 10
@@ -582,14 +599,14 @@ def test_ingestion_worker_full_sync_lifecycle_and_cleanup(memory_catalog: Catalo
 
     cat.create_job(job_id, kb_id="kb1", source_id="src_sync", stage="PREPARING")
 
-    manifest = StagedJobManifest(
+    manifest = create_staged_job_manifest(
         job_id=job_id,
         kb_id="kb1",
         source_id="src_sync",
         scan_id="scan_100",
         mode="full_folder",
         actions=[
-            StagedAction(
+            create_staged_action(
                 action="add",
                 relative_path="docs/doc1.md",
                 staged_filename="doc1.md",
@@ -598,9 +615,9 @@ def test_ingestion_worker_full_sync_lifecycle_and_cleanup(memory_catalog: Catalo
     )
 
     completed_job = worker.process_job(job_id, manifest)
-    assert completed_job.stage == "COMPLETED"
-    assert completed_job.counters["added"] == 1
-    assert completed_job.counters["failed"] == 0
+    assert completed_job["stage"] == "COMPLETED"
+    assert completed_job["counters"]["added"] == 1
+    assert completed_job["counters"]["failed"] == 0
 
     # Staging cleanup verified (§4: staged incoming file unlinked)
     assert not staged_file.exists()
@@ -613,4 +630,4 @@ def test_ingestion_worker_full_sync_lifecycle_and_cleanup(memory_catalog: Catalo
 
     # Idempotent re-run
     rerun_job = worker.process_job(job_id, manifest)
-    assert rerun_job.stage == "COMPLETED"
+    assert rerun_job["stage"] == "COMPLETED"

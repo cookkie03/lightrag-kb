@@ -13,7 +13,7 @@ def test_catalog_persists_sources_in_json(tmp_path):
     snapshot = json.loads((tmp_path / "notes" / "catalog.json").read_text())
     assert snapshot["sources"]["mac"]["name"] == "Notes"
     with Catalog.open_for_kb("notes", tmp_path) as catalog:
-        assert catalog.get_source("mac").name == "Notes"
+        assert catalog.get_source("mac")["name"] == "Notes"
 
 
 def test_existing_sqlite_is_not_silently_replaced(tmp_path):

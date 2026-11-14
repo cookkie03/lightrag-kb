@@ -2,7 +2,7 @@
 
 from contextlib import nullcontext
 
-from pipeline.ingestion_worker import IngestionWorker, StagedAction, StagedJobManifest
+from pipeline.ingestion_worker import IngestionWorker, create_staged_action, create_staged_job_manifest
 from storage.catalog import Catalog
 
 
@@ -26,8 +26,8 @@ def test_checksum_mismatch_keeps_staged_file_and_skips_parser(tmp_path, monkeypa
         staged = incoming / "file.txt"
         staged.write_text("actual data")
         worker = IngestionWorker(catalog, Indexer(), tmp_path / "derived", tmp_path / "staging")
-        action = StagedAction("add", "file.txt", binary_sha256="0" * 64, staged_filename="file.txt")
-        result = worker.process_job("job", StagedJobManifest("job", "kb", "source", actions=[action]))
-        assert result.stage == "FAILED_RETRYABLE"
+        action = create_staged_action("add", "file.txt", binary_sha256="0" * 64, staged_filename="file.txt")
+        result = worker.process_job("job", create_staged_job_manifest("job", "kb", "source", actions=[action]))
+        assert result["stage"] == "FAILED_RETRYABLE"
         assert not calls
         assert staged.read_text() == "actual data"

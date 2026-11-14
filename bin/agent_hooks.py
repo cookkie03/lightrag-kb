@@ -111,7 +111,7 @@ def capture_post_session(
     }
 
 
-# Install hooks in Claude Code project or global settings.
+# Configure project-level memory hooks or instructions for supported coding agents.
 def install_client_hook(
     client: str = "claude-code",
     kb_name: str = "agent-memory",
@@ -157,9 +157,89 @@ def install_client_hook(
             "hooks": list(hooks.keys()),
         }
 
+    if client == "cursor":
+        rules_dir = proj_dir / ".cursor" / "rules"
+        rules_dir.mkdir(parents=True, exist_ok=True)
+        rules_file = rules_dir / "agent-memory.mdc"
+        content = (
+            "---\n"
+            "description: Agent memory instructions and tools for project context\n"
+            "globs: *\n"
+            "alwaysApply: true\n"
+            "---\n\n"
+            f"# Agent Memory Instructions ({kb_name})\n\n"
+            f"Use the `{kb_name}` knowledge base to retain context across development sessions.\n\n"
+            "## Context Injection\n"
+            f"Inject relevant memories before working on tasks:\n"
+            f"`ragcli memory inject --kb {kb_name}`\n\n"
+            "## Memory Management Tools\n"
+            "Use the MCP memory tools to manage long-term project knowledge:\n"
+            "- `remember`: Store decisions, architectural choices, and user preferences.\n"
+            "- `search_memory`: Search stored project memories and decisions.\n"
+            "- `deprecate_memory`: Mark outdated memories as inactive when requirements change.\n"
+        )
+        rules_file.write_text(content, encoding="utf-8")
+        return {
+            "status": "ok",
+            "client": client,
+            "configured_file": str(rules_file),
+        }
+
+    if client == "codex":
+        codex_dir = proj_dir / ".codex"
+        codex_dir.mkdir(parents=True, exist_ok=True)
+        instructions_file = codex_dir / "instructions.md"
+        memory_section = (
+            f"# Agent Memory Instructions ({kb_name})\n\n"
+            f"Follow these memory guidelines when working on this project:\n"
+            f"- Pre-session context injection: `ragcli memory inject --kb {kb_name}`\n"
+            f"- Search active memories: `ragcli memory recall --kb {kb_name} \"<query>\"`\n"
+            f"- Post-session capture: `ragcli memory capture --kb {kb_name}`\n"
+            "- When MCP is available, use `remember`, `search_memory`, and `deprecate_memory` tools.\n"
+        )
+        if instructions_file.is_file():
+            existing = instructions_file.read_text(encoding="utf-8")
+            if f"Agent Memory Instructions ({kb_name})" not in existing:
+                combined = existing.rstrip() + "\n\n" + memory_section
+                instructions_file.write_text(combined, encoding="utf-8")
+        else:
+            instructions_file.write_text(memory_section, encoding="utf-8")
+
+        return {
+            "status": "ok",
+            "client": client,
+            "configured_file": str(instructions_file),
+        }
+
+    if client == "antigravity":
+        gemini_dir = proj_dir / ".gemini"
+        gemini_dir.mkdir(parents=True, exist_ok=True)
+        instructions_file = gemini_dir / "GEMINI.md"
+        memory_section = (
+            f"# Agent Memory Guidelines ({kb_name})\n\n"
+            f"Maintain project context and memory using the `{kb_name}` knowledge base:\n"
+            f"- Context recall: `ragcli memory recall --kb {kb_name} \"<query>\"`\n"
+            f"- Context injection: `ragcli memory inject --kb {kb_name}`\n"
+            f"- Capture session memories: `ragcli memory capture --kb {kb_name}`\n"
+            "- Use MCP memory tools `remember`, `search_memory`, and `deprecate_memory` to manage decisions.\n"
+        )
+        if instructions_file.is_file():
+            existing = instructions_file.read_text(encoding="utf-8")
+            if f"Agent Memory Guidelines ({kb_name})" not in existing:
+                combined = existing.rstrip() + "\n\n" + memory_section
+                instructions_file.write_text(combined, encoding="utf-8")
+        else:
+            instructions_file.write_text(memory_section, encoding="utf-8")
+
+        return {
+            "status": "ok",
+            "client": client,
+            "configured_file": str(instructions_file),
+        }
+
     return {
         "status": "error",
-        "message": f"Unsupported client: {client}. Currently supported: claude-code",
+        "message": f"Unsupported client: {client}. Currently supported: claude-code, cursor, codex, antigravity",
     }
 
 
@@ -181,7 +261,7 @@ def main() -> None:
 
     # install
     inst_parser = subparsers.add_parser("install")
-    inst_parser.add_argument("--client", default="claude-code", choices=["claude-code"])
+    inst_parser.add_argument("--client", default="claude-code", choices=["claude-code", "cursor", "codex", "antigravity"])
     inst_parser.add_argument("--kb", default="agent-memory")
     inst_parser.add_argument("--project-dir", default=None)
 

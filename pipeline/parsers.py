@@ -19,7 +19,6 @@ import os
 import shutil
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -206,23 +205,29 @@ def looks_garbled(text: str, threshold: float = 0.15) -> bool:
     return (garbled / total) > threshold
 
 
-@dataclass
-class ParsedDocument:
-    """Container for parsed text content, derived hashes, and structured sidecar metadata."""
-
-    canonical_doc_id: str
-    category: str
-    text_content: str
-    binary_sha256: str
-    derived_hash: str
-    parser_name: str
-    parser_version: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    sidecar: dict[str, Any] = field(default_factory=dict)
-
-    # Serialize the parsed content together with its metadata and sidecar.
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+def create_parsed_document(
+    canonical_doc_id: str,
+    category: str,
+    text_content: str,
+    binary_sha256: str,
+    derived_hash: str,
+    parser_name: str,
+    parser_version: str,
+    metadata: dict[str, Any] | None = None,
+    sidecar: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Create a parsed document as a plain dict."""
+    return {
+        "canonical_doc_id": canonical_doc_id,
+        "category": category,
+        "text_content": text_content,
+        "binary_sha256": binary_sha256,
+        "derived_hash": derived_hash,
+        "parser_name": parser_name,
+        "parser_version": parser_version,
+        "metadata": metadata or {},
+        "sidecar": sidecar or {},
+    }
 
 
 def get_linux_docling_config(env: dict[str, str] | None = None) -> dict[str, Any]:
@@ -424,7 +429,7 @@ def parse_text_file(
     path: Path,
     binary_sha256: str | None = None,
     source_uri: str = "",
-) -> ParsedDocument:
+) -> dict[str, Any]:
     """Parse a plain text, markdown, or code document."""
     p = Path(path)
     if not p.is_file():
@@ -480,7 +485,7 @@ def parse_text_file(
         "metadata": metadata,
     }
 
-    return ParsedDocument(
+    return create_parsed_document(
         canonical_doc_id=canonical_id,
         category="text",
         text_content=text,
@@ -499,7 +504,7 @@ def parse_visual_document(
     runner: Callable[[str, str, int, str], str] | None = None,
     binary_sha256: str | None = None,
     source_uri: str = "",
-) -> ParsedDocument:
+) -> dict[str, Any]:
     """Parse PDF or image document using Linux Docling with OCR fallback (§7)."""
     p = Path(path)
     if not p.is_file():
@@ -579,7 +584,7 @@ def parse_visual_document(
         "metadata": metadata,
     }
 
-    return ParsedDocument(
+    return create_parsed_document(
         canonical_doc_id=canonical_id,
         category=category,
         text_content=markdown_content,
@@ -598,7 +603,7 @@ def parse_native_document(
     runner: Callable[[str, str, int, str], str] | None = None,
     binary_sha256: str | None = None,
     source_uri: str = "",
-) -> ParsedDocument:
+) -> dict[str, Any]:
     """Parse Office / ODF / EPUB / email documents using Docling native converter (§7)."""
     p = Path(path)
     if not p.is_file():
@@ -646,7 +651,7 @@ def parse_native_document(
         "metadata": metadata,
     }
 
-    return ParsedDocument(
+    return create_parsed_document(
         canonical_doc_id=canonical_id,
         category="office",
         text_content=markdown_content,
@@ -665,7 +670,7 @@ def parse_audio_document(
     runner: Callable[[str, str, int, str], str] | None = None,
     binary_sha256: str | None = None,
     source_uri: str = "",
-) -> ParsedDocument:
+) -> dict[str, Any]:
     """Parse audio or spoken video file using Linux ASR (whisper_turbo_native / faster-whisper) (§7)."""
     p = Path(path)
     if not p.is_file():
@@ -719,7 +724,7 @@ def parse_audio_document(
         "metadata": metadata,
     }
 
-    return ParsedDocument(
+    return create_parsed_document(
         canonical_doc_id=canonical_id,
         category="audio",
         text_content=markdown_content,
@@ -738,7 +743,7 @@ def parse_document(
     runner: Callable[[str, str, int, str], str] | None = None,
     binary_sha256: str | None = None,
     source_uri: str = "",
-) -> ParsedDocument:
+) -> dict[str, Any]:
     """Unified entry point to parse any supported document according to §7."""
     p = Path(path)
     cat = get_file_category(p)
@@ -767,7 +772,7 @@ def parse_document(
 
 
 def save_derived_artifacts(
-    parsed: ParsedDocument,
+    parsed: dict[str, Any],
     derived_dir: Path | str,
     relative_path: Path | str,
     source_uri: str = "",
@@ -784,14 +789,14 @@ def save_derived_artifacts(
     rel = Path(safe_rel_str)
 
     # 1. Markdown artifact path: <derived_dir>/<category>/<relative_path>.md
-    md_out_path = root / parsed.category / f"{rel.as_posix()}.md"
+    md_out_path = root / parsed["category"] / f"{rel.as_posix()}.md"
     if not md_out_path.resolve().is_relative_to(root):
         raise SafePathError(f"Destinazione markdown non sicura: '{md_out_path}'")
     md_out_path.parent.mkdir(parents=True, exist_ok=True)
-    md_out_path.write_text(parsed.text_content, encoding="utf-8")
+    md_out_path.write_text(parsed["text_content"], encoding="utf-8")
 
     # 2. Sidecar artifact path: <derived_dir>/<category>/<relative_path>.sidecar.json
-    sidecar_out_path = root / parsed.category / f"{rel.as_posix()}.sidecar.json"
+    sidecar_out_path = root / parsed["category"] / f"{rel.as_posix()}.sidecar.json"
     if not sidecar_out_path.resolve().is_relative_to(root):
         raise SafePathError(f"Destinazione sidecar non sicura: '{sidecar_out_path}'")
     sidecar_out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -799,9 +804,9 @@ def save_derived_artifacts(
     # Also persist canonical sidecar index: <derived_dir>/sidecars/<canonical_doc_id>.json
     canonical_sidecar_dir = root / "sidecars"
     canonical_sidecar_dir.mkdir(parents=True, exist_ok=True)
-    canonical_sidecar_path = canonical_sidecar_dir / f"{parsed.canonical_doc_id}.json"
+    canonical_sidecar_path = canonical_sidecar_dir / f"{parsed['canonical_doc_id']}.json"
 
-    sidecar_data = dict(parsed.sidecar)
+    sidecar_data = dict(parsed["sidecar"])
     if source_uri:
         sidecar_data["source_uri"] = source_uri
     sidecar_data["markdown_artifact_path"] = str(md_out_path)

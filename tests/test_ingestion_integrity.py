@@ -3,7 +3,7 @@
 from contextlib import nullcontext
 
 from pipeline.indexer import LightRAGError, ProtectedIndexer
-from pipeline.ingestion_worker import IngestionWorker, StagedAction, StagedJobManifest
+from pipeline.ingestion_worker import IngestionWorker, create_staged_action, create_staged_job_manifest
 from pipeline.parsers import parse_document, save_derived_artifacts
 from storage.catalog import Catalog
 
@@ -22,8 +22,8 @@ def test_manifest_identity_mismatch_is_rejected(tmp_path):
         catalog.add_source("source", "Source")
         catalog.create_job("job", "kb", source_id="source")
         worker = IngestionWorker(catalog, Indexer(), tmp_path / "derived", tmp_path / "staging")
-        result = worker.process_job("job", StagedJobManifest("other", "kb", "source"))
-        assert result.stage != "COMPLETED"
+        result = worker.process_job("job", create_staged_job_manifest("other", "kb", "source"))
+        assert result["stage"] != "COMPLETED"
 
 
 def test_staged_symlink_outside_sandbox_is_rejected(tmp_path, monkeypatch):
@@ -38,9 +38,9 @@ def test_staged_symlink_outside_sandbox_is_rejected(tmp_path, monkeypatch):
         outside.write_text("outside")
         (incoming / "file.txt").symlink_to(outside)
         worker = IngestionWorker(catalog, Indexer(), tmp_path / "derived", tmp_path / "staging")
-        action = StagedAction("add", "file.txt", staged_filename="file.txt")
-        result = worker.process_job("job", StagedJobManifest("job", "kb", "source", actions=[action]))
-        assert result.stage != "COMPLETED"
+        action = create_staged_action("add", "file.txt", staged_filename="file.txt")
+        result = worker.process_job("job", create_staged_job_manifest("job", "kb", "source", actions=[action]))
+        assert result["stage"] != "COMPLETED"
         assert not calls
         assert outside.read_text() == "outside"
 
@@ -100,13 +100,13 @@ def test_worker_recovery_preserves_old_content_at_same_artifact_path(tmp_path):
         backend.rejected_content = "VERSIONE_2"
         catalog.create_job("job", "kb", source_id="source")
         worker = IngestionWorker(catalog, indexer, derived, staging)
-        action = StagedAction("modify", "note.txt", staged_filename="note.txt")
-        manifest = StagedJobManifest("job", "kb", "source", actions=[action])
+        action = create_staged_action("modify", "note.txt", staged_filename="note.txt")
+        manifest = create_staged_job_manifest("job", "kb", "source", actions=[action])
 
         result = worker.process_job("job", manifest)
 
-        assert result.stage == "FAILED_RETRYABLE"
+        assert result["stage"] == "FAILED_RETRYABLE"
         assert new_input.read_text(encoding="utf-8") == "VERSIONE_2"
-        assert catalog.get_file("source", "note.txt").canonical_doc_id == old_parsed.canonical_doc_id
-        assert backend.documents[old_parsed.canonical_doc_id]["content"] == "VERSIONE_1"
+        assert catalog.get_file("source", "note.txt")["canonical_doc_id"] == old_parsed["canonical_doc_id"]
+        assert backend.documents[old_parsed["canonical_doc_id"]]["content"] == "VERSIONE_1"
         assert old_artifact.read_text(encoding="utf-8") == "VERSIONE_1"

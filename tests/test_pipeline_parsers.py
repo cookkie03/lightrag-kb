@@ -31,14 +31,15 @@ if str(ROOT) not in sys.path:
 from pipeline.parsers import (
     GARBLED_RANGES,
     LinuxConfigurationError,
-    ParsedDocument,
     ParserError,
+    SafePathError,
     UnsupportedFormatError,
     build_docling_audio_code,
     build_docling_native_code,
     build_docling_visual_code,
     compute_file_sha256,
     compute_text_sha256,
+    create_parsed_document,
     generate_canonical_doc_id,
     get_file_category,
     get_linux_docling_config,
@@ -102,13 +103,13 @@ def test_parse_text_file_utf8(tmp_path: Path):
     p.write_text("# Title\n\nThis is a sample markdown note with emoji: 🚀\n", encoding="utf-8")
 
     parsed = parse_text_file(p, source_uri="macbook:/notes/note.md")
-    assert parsed.category == "text"
-    assert parsed.parser_name == "text_plain"
-    assert "# Title" in parsed.text_content
-    assert parsed.metadata["encoding"] == "utf-8"
-    assert parsed.metadata["line_count"] == 3
-    assert parsed.sidecar["source_uri"] == "macbook:/notes/note.md"
-    assert parsed.sidecar["stats"]["char_count"] == len(parsed.text_content)
+    assert parsed["category"] == "text"
+    assert parsed["parser_name"] == "text_plain"
+    assert "# Title" in parsed["text_content"]
+    assert parsed["metadata"]["encoding"] == "utf-8"
+    assert parsed["metadata"]["line_count"] == 3
+    assert parsed["sidecar"]["source_uri"] == "macbook:/notes/note.md"
+    assert parsed["sidecar"]["stats"]["char_count"] == len(parsed["text_content"])
 
 
 def test_parse_text_file_latin1_fallback(tmp_path: Path):
@@ -117,9 +118,9 @@ def test_parse_text_file_latin1_fallback(tmp_path: Path):
     p.write_bytes("Parliamo d'affari: caffè e qualità.".encode("latin-1"))
 
     parsed = parse_text_file(p)
-    assert parsed.category == "text"
-    assert "caffè" in parsed.text_content
-    assert parsed.metadata["encoding"] in ("cp1252", "latin-1")
+    assert parsed["category"] == "text"
+    assert "caffè" in parsed["text_content"]
+    assert parsed["metadata"]["encoding"] in ("cp1252", "latin-1")
 
 
 def test_parse_text_file_strips_nul_bytes(tmp_path: Path):
@@ -127,8 +128,8 @@ def test_parse_text_file_strips_nul_bytes(tmp_path: Path):
     p.write_bytes(b"Clean\x00Text\x00Without\x00Nul\n")
 
     parsed = parse_text_file(p)
-    assert "\x00" not in parsed.text_content
-    assert "CleanTextWithoutNul" in parsed.text_content
+    assert "\x00" not in parsed["text_content"]
+    assert "CleanTextWithoutNul" in parsed["text_content"]
 
 
 # -----------------------------------------------------------------------------
@@ -242,9 +243,9 @@ def test_parse_visual_document_with_garbled_probe(tmp_path: Path):
         runner=fake_runner,
     )
 
-    assert parsed.category == "pdf"
-    assert parsed.metadata["force_full_page_ocr"] is True
-    assert "# OCR Extracted Page" in parsed.text_content
+    assert parsed["category"] == "pdf"
+    assert parsed["metadata"]["force_full_page_ocr"] is True
+    assert "# OCR Extracted Page" in parsed["text_content"]
     # Ensure probe was called and then full OCR script was executed with force_full_page_ocr=True
     assert len(executed_scripts) == 2
     assert "force_full_page_ocr=True" in executed_scripts[1]
@@ -268,9 +269,9 @@ def test_parse_native_document(tmp_path: Path):
         env={"DOCLING_PLATFORM": "linux"},
         runner=fake_runner,
     )
-    assert parsed.category == "office"
-    assert parsed.parser_name == "docling_native"
-    assert "Paragraph 1" in parsed.text_content
+    assert parsed["category"] == "office"
+    assert parsed["parser_name"] == "docling_native"
+    assert "Paragraph 1" in parsed["text_content"]
 
 
 def test_parse_audio_document_requires_ffmpeg(tmp_path: Path, monkeypatch):
@@ -299,10 +300,10 @@ def test_parse_audio_document_linux_whisper(tmp_path: Path, monkeypatch):
         env={"DOCLING_PLATFORM": "linux", "DOCLING_ASR_ENGINE": "whisper_turbo_native"},
         runner=fake_runner,
     )
-    assert parsed.category == "audio"
+    assert parsed["category"] == "audio"
     assert "WHISPER_TURBO_NATIVE" in executed[0]
     assert "WHISPER_TURBO_MLX" not in executed[0]
-    assert "[00:01]" in parsed.text_content
+    assert "[00:01]" in parsed["text_content"]
 
 
 def test_parse_document_dispatcher(tmp_path: Path):
@@ -310,8 +311,8 @@ def test_parse_document_dispatcher(tmp_path: Path):
     txt.write_text("print('hello world')", encoding="utf-8")
 
     parsed = parse_document(txt)
-    assert parsed.category == "text"
-    assert "hello world" in parsed.text_content
+    assert parsed["category"] == "text"
+    assert "hello world" in parsed["text_content"]
 
     # Unsupported format
     unsupported = tmp_path / "file.xyz123"
@@ -342,23 +343,23 @@ def test_save_derived_artifacts_persistence(tmp_path: Path):
     # 1. Verify markdown output path and content
     assert md_path.exists()
     assert md_path == derived_dir / "text" / "projects" / "report.md.md"
-    assert md_path.read_text(encoding="utf-8") == parsed.text_content
+    assert md_path.read_text(encoding="utf-8") == parsed["text_content"]
 
     # 2. Verify relative sidecar path and content
     assert sidecar_path.exists()
     assert sidecar_path == derived_dir / "text" / "projects" / "report.md.sidecar.json"
     sidecar_data = json.loads(sidecar_path.read_text(encoding="utf-8"))
 
-    assert sidecar_data["canonical_doc_id"] == parsed.canonical_doc_id
-    assert sidecar_data["binary_sha256"] == parsed.binary_sha256
-    assert sidecar_data["derived_hash"] == parsed.derived_hash
+    assert sidecar_data["canonical_doc_id"] == parsed["canonical_doc_id"]
+    assert sidecar_data["binary_sha256"] == parsed["binary_sha256"]
+    assert sidecar_data["derived_hash"] == parsed["derived_hash"]
     assert sidecar_data["category"] == "text"
     assert sidecar_data["source_uri"] == "nas:/vol1/report.md"
     assert sidecar_data["markdown_artifact_path"] == str(md_path)
-    assert sidecar_data["stats"]["char_count"] == len(parsed.text_content)
+    assert sidecar_data["stats"]["char_count"] == len(parsed["text_content"])
 
     # 3. Verify canonical sidecar index
-    canonical_sidecar = derived_dir / "sidecars" / f"{parsed.canonical_doc_id}.json"
+    canonical_sidecar = derived_dir / "sidecars" / f"{parsed['canonical_doc_id']}.json"
     assert canonical_sidecar.exists()
     canonical_data = json.loads(canonical_sidecar.read_text(encoding="utf-8"))
-    assert canonical_data["canonical_doc_id"] == parsed.canonical_doc_id
+    assert canonical_data["canonical_doc_id"] == parsed["canonical_doc_id"]

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import uuid
 import os
 import shutil
 import subprocess
@@ -40,7 +39,19 @@ from kb_registry import (
     storage_mode,
     write_kb_env,
 )
-
+from bin.archive_importer import import_archive_to_kb
+from bin.agent_hooks import (
+    capture_post_session,
+    inject_pre_prompt_context,
+    install_client_hook,
+)
+from pipeline.dreaming import (
+    deprecate_memory_by_id,
+    load_kb_memories,
+    query_memories,
+    remember_memory,
+    run_dreaming_cycle,
+)
 
 LINUX_SYSTEMD_UNITS = (
     "lightrag-server@.service",
@@ -48,6 +59,8 @@ LINUX_SYSTEMD_UNITS = (
     "lightrag-mcp@.service",
     "obsidian-mcp-oauth-shim.service",
 )
+
+
 def _completed_process(args: list[str], returncode: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(args=args, returncode=returncode, stdout=stdout, stderr=stderr)
 
@@ -384,7 +397,7 @@ def cmd_add(args: argparse.Namespace) -> None:
     env = global_env()
     registry = load_registry(env)
     if find_kb(registry, args.name):
-        sys.exit(f"KB '{args.name}' già esistente.")
+        sys.exit(f"KB '{args.name}' gia esistente.")
     source_dir = Path(args.source_dir).expanduser().resolve()
     if not source_dir.is_dir():
         sys.exit(f"Cartella sorgente inesistente: {source_dir}")
@@ -402,7 +415,7 @@ def cmd_add(args: argparse.Namespace) -> None:
     write_kb_env(kb, env)
     registry["kbs"].append(kb)
     save_registry(registry)
-    print(f"✓ KB '{args.name}' creata.")
+    print(f"KB '{args.name}' creata.")
     print(f"  source     : {kb['source_dir']}")
     print(f"  data dir   : {kb['data_dir']}")
     print(f"  rag_storage: {kb['rag_storage']}")
@@ -443,7 +456,7 @@ def cmd_exclude_add(args: argparse.Namespace) -> None:
     write_kb_env(kb)
     if added:
         display, _ = canonicalize_exclude_specs(added)
-        print(f"✓ Esclusi da '{args.name}': {', '.join(display)}")
+        print(f"Esclusi da '{args.name}': {', '.join(display)}")
     else:
         print(f"Nessun nuovo pattern da aggiungere per '{args.name}'.")
 
@@ -467,7 +480,7 @@ def cmd_exclude_rm(args: argparse.Namespace) -> None:
     save_registry(registry)
     write_kb_env(kb)
     if removed:
-        print(f"✓ Rimosse esclusioni da '{args.name}': {', '.join(removed)}")
+        print(f"Rimosse esclusioni da '{args.name}': {', '.join(removed)}")
     else:
         sys.exit(f"Nessun pattern rimosso da '{args.name}'.")
 
@@ -514,7 +527,7 @@ def cmd_start(args: argparse.Namespace) -> None:
     _, server_bin = _ensure_runtime(env)
     state = _kb_server_state(kb)
     if state == "up":
-        print(f"'{args.name}' già attiva su :{kb['port']}")
+        print(f"'{args.name}' gia attiva su :{kb['port']}")
         return
     if state == "zombie":
         sys.exit(
@@ -544,10 +557,10 @@ def cmd_start(args: argparse.Namespace) -> None:
         )
     if not _wait_for_health(kb["port"]):
         sys.exit(
-            f"Il server di '{args.name}' non è diventato healthy. "
+            f"Il server di '{args.name}' non e diventato healthy. "
             f"Controlla il log in {log_path}"
         )
-    print(f"✓ Server '{args.name}' attivo su http://127.0.0.1:{kb['port']}")
+    print(f"Server '{args.name}' attivo su http://127.0.0.1:{kb['port']}")
 
 
 def cmd_stop(args: argparse.Namespace) -> None:
@@ -557,14 +570,14 @@ def cmd_stop(args: argparse.Namespace) -> None:
         sys.exit(f"KB '{args.name}' non trovata.")
     state = _kb_server_state(kb)
     if state == "down":
-        print(f"'{args.name}' già spenta.")
+        print(f"'{args.name}' gia spenta.")
         return
     if not _stop_server(kb):
         sys.exit(
             f"Impossibile fermare '{args.name}' su :{kb['port']}. "
-            f"Controlla manualmente il processo {port_pid(kb['port']) or '?'}."
+            f"Controlla manualmente il processo {port_pid(kb['port']) or '?'}.)"
         )
-    print(f"✓ Server '{args.name}' fermato.")
+    print(f"Server '{args.name}' fermato.")
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
@@ -583,7 +596,7 @@ def cmd_remove(args: argparse.Namespace) -> None:
     save_registry(registry)
     if delete_target.exists():
         shutil.rmtree(delete_target)
-    print(f"✓ KB '{args.name}' rimossa.")
+    print(f"KB '{args.name}' rimossa.")
     print(f"  source preservata: {kb['source_dir']}")
     print(f"  stato eliminato   : {delete_target}")
     if mcp_warnings:
@@ -632,7 +645,7 @@ def cmd_move(args: argparse.Namespace) -> None:
     else:
         destination = (Path(kb["source_dir"]) / ".lightrag").resolve()
     if current == destination:
-        print(f"Nessuno spostamento necessario: già in {destination}")
+        print(f"Nessuno spostamento necessario: gia in {destination}")
         return
     if destination.exists() and any(destination.iterdir()):
         sys.exit(f"Destinazione non vuota: {destination}")
@@ -647,7 +660,7 @@ def cmd_move(args: argparse.Namespace) -> None:
     ensure_kb_dirs(kb)
     write_kb_env(kb, env)
     save_registry(registry)
-    print(f"✓ KB '{args.name}' spostata in {destination}")
+    print(f"KB '{args.name}' spostata in {destination}")
 
 
 def cmd_mcp_add(args: argparse.Namespace) -> None:
@@ -694,6 +707,7 @@ def cmd_sync_prepare(args: argparse.Namespace) -> None:
     """Create a source-bound sync job and return its comparison snapshot."""
     from storage.catalog import Catalog
     from sync.server import prepare_sync
+    import uuid
 
     try:
         if not find_kb(load_registry(global_env()), args.kb):
@@ -716,13 +730,13 @@ def cmd_job_status(args: argparse.Namespace) -> None:
         with Catalog.open_for_kb(args.kb, KB_ROOT) as catalog:
             while True:
                 job = catalog.get_job(args.job_id)
-                if not job or job.kb_id != args.kb:
+                if not job or job["kb_id"] != args.kb:
                     raise ValueError("unknown job")
-                if args.job_cmd != "wait" or job.stage in {"COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}:
+                if args.job_cmd != "wait" or job["stage"] in {"COMPLETED", "FAILED_RETRYABLE", "FAILED_FINAL", "NEEDS_REVIEW"}:
                     break
                 time.sleep(1)
-        ok = args.job_cmd != "wait" or job.stage == "COMPLETED"
-        print(json.dumps({"ok": ok, "job_id": job.job_id, "kb": job.kb_id, "source": job.source_id, "state": job.stage, **job.counters}, ensure_ascii=False))
+        ok = args.job_cmd != "wait" or job["stage"] == "COMPLETED"
+        print(json.dumps({"ok": ok, "job_id": job["job_id"], "kb": job["kb_id"], "source": job["source_id"], "state": job["stage"], **job["counters"]}, ensure_ascii=False))
         if not ok:
             raise SystemExit(1)
     except (ValueError, OSError, RuntimeError) as exc:
@@ -730,10 +744,123 @@ def cmd_job_status(args: argparse.Namespace) -> None:
         raise SystemExit(1) from exc
 
 
+def cmd_memory_remember(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+    mem = remember_memory(
+        source_dir=kb["source_dir"],
+        content=args.content,
+        memory_type=args.type,
+        title=args.title or "",
+        tags=args.tags.split(",") if args.tags else [],
+        supersedes_id=args.supersedes,
+    )
+    print(json.dumps({"ok": True, "memory": mem.to_dict()}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_recall(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+    results = query_memories(
+        source_dir=kb["source_dir"],
+        query=args.query,
+        memory_type=args.type,
+        active_only=not args.all,
+        top_k=args.top_k,
+    )
+    print(json.dumps({"ok": True, "count": len(results), "memories": [m.to_dict() for m in results]}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_dream(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+    report = run_dreaming_cycle(source_dir=kb["source_dir"], dry_run=args.dry_run)
+    print(json.dumps({"ok": True, "report": report}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_list(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+    memories = load_kb_memories(kb["source_dir"])
+    if args.type:
+        memories = [m for m in memories if m.type == args.type]
+    if args.status:
+        memories = [m for m in memories if m.status == args.status]
+    print(json.dumps({"ok": True, "count": len(memories), "memories": [m.to_dict() for m in memories]}, indent=2, ensure_ascii=False))
+
+
+def cmd_memory_deprecate(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+    mem = deprecate_memory_by_id(
+        source_dir=kb["source_dir"],
+        memory_id=args.memory_id,
+        reason=args.reason or "",
+        superseded_by=args.superseded_by,
+    )
+    if not mem:
+        sys.exit(f"Memoria '{args.memory_id}' non trovata.")
+    print(json.dumps({"ok": True, "memory": mem.to_dict()}, indent=2, ensure_ascii=False))
+
+
+def cmd_import_archive(args: argparse.Namespace) -> None:
+    registry = load_registry(global_env())
+    kb = find_kb(registry, args.kb)
+    if not kb:
+        sys.exit(f"KB '{args.kb}' non trovata.")
+    res = import_archive_to_kb(
+        archive_path=args.archive,
+        output_source_dir=kb["source_dir"],
+        provider=args.format or "auto",
+    )
+    print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
+
+
+def cmd_hook_inject(args: argparse.Namespace) -> None:
+    prompt = args.prompt
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read()
+    res = inject_pre_prompt_context(args.kb, prompt)
+    if res:
+        print(res)
+
+
+def cmd_hook_capture(args: argparse.Namespace) -> None:
+    text = args.text
+    if not text and not args.transcript and not sys.stdin.isatty():
+        text = sys.stdin.read()
+    res = capture_post_session(
+        kb_name=args.kb,
+        transcript_path=args.transcript,
+        raw_text=text,
+        session_id=args.session_id,
+    )
+    print(json.dumps(res, indent=2, ensure_ascii=False))
+
+
+def cmd_hook_install(args: argparse.Namespace) -> None:
+    res = install_client_hook(
+        client=args.client,
+        kb_name=args.kb,
+        target_project_dir=args.project_dir,
+    )
+    print(json.dumps(res, indent=2, ensure_ascii=False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ragcli",
-        description="CLI minimale per gestire KB LightRAG WebUI-first con runtime condiviso.",
+        description="CLI minima per gestire KB LightRAG WebUI-first con runtime condiviso.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -767,7 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd = sub.add_parser("list", help="elenca le KB registrate")
     list_cmd.set_defaults(func=cmd_list)
 
-    ingest = sub.add_parser("ingest", help="sync incrementale della sorgente verso la KB già avviata")
+    ingest = sub.add_parser("ingest", help="sync incrementale della sorgente verso la KB gia avviata")
     ingest.add_argument("name")
     ingest.add_argument("--force", action="store_true", help="rigenera derivati e riallinea forzatamente la KB")
     ingest.set_defaults(func=cmd_ingest)
@@ -777,8 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
         "- usa / finale per indicare una cartella: 'agent/' prende la cartella top-level 'agent'; 'notes/agent/' prende quel path specifico\n"
         "- usa * per i file: '*.txt' prende tutti i file txt; 'agent*' prende agent.md, agentico.md, ecc.\n"
         "- usa '.*/' per dire 'tutte le cartelle top-level che iniziano con .' nella KB; l'espansione avviene live con 'ls --expanded' e durante ingest\n"
-        "- puoi passare più pattern nella stessa istruzione, separati da spazi oppure con virgole o ';'\n"
-        "- 'ls' mostra le regole salvate; 'ls --expanded' mostra l'espansione corrente delle cartelle\n"
+        "- puoi passare piu pattern nella stessa istruzione, separati da spazi oppure con virgole o ';'\n"
         "- quota sempre i pattern per evitare l'espansione della shell\n"
         "Esempi:\n"
         "  ragcli exclude add second-brain '*.txt' 'agent*' 'agent/'\n"
@@ -795,7 +921,7 @@ def build_parser() -> argparse.ArgumentParser:
     exclude_sub = exclude.add_subparsers(dest="exclude_cmd", required=True)
     ex_add = exclude_sub.add_parser(
         "add",
-        help="aggiunge uno o più pattern di esclusione",
+        help="aggiunge uno o piu pattern di esclusione",
         description=exclude_help,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -804,7 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
     ex_add.set_defaults(func=cmd_exclude_add)
     ex_rm = exclude_sub.add_parser(
         "rm",
-        help="rimuove uno o più pattern di esclusione",
+        help="rimuove uno o piu pattern di esclusione",
         description=exclude_help,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -862,6 +988,74 @@ def build_parser() -> argparse.ArgumentParser:
     service_logs.set_defaults(func=cmd_service_logs)
     service_install = service_sub.add_parser("install-units", help="installa le unit systemd --user del repo")
     service_install.set_defaults(func=cmd_service_install_units)
+
+    # memory subcommand
+    mem_parser = sub.add_parser("memory", help="gestione memoria per coding agents")
+    mem_sub = mem_parser.add_subparsers(dest="memory_cmd", required=True)
+
+    rem_p = mem_sub.add_parser("remember", help="salva una nuova memoria")
+    rem_p.add_argument("kb", help="nome della KB")
+    rem_p.add_argument("content", help="testo della memoria")
+    rem_p.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default="fact")
+    rem_p.add_argument("--title", default="")
+    rem_p.add_argument("--tags", default="", help="tag separati da virgola")
+    rem_p.add_argument("--supersedes", default=None, help="ID memoria superata da questa")
+    rem_p.set_defaults(func=cmd_memory_remember)
+
+    rec_p = mem_sub.add_parser("recall", help="cerca tra le memorie attive")
+    rec_p.add_argument("kb", help="nome della KB")
+    rec_p.add_argument("query", help="termini di ricerca")
+    rec_p.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default=None)
+    rec_p.add_argument("--all", action="store_true", help="includi memorie superseded/deprecated")
+    rec_p.add_argument("--top-k", type=int, default=5)
+    rec_p.set_defaults(func=cmd_memory_recall)
+
+    drm_p = mem_sub.add_parser("dream", help="lancia il ciclo di consolidamento e dedup (Dreaming)")
+    drm_p.add_argument("kb", help="nome della KB")
+    drm_p.add_argument("--dry-run", action="store_true")
+    drm_p.set_defaults(func=cmd_memory_dream)
+
+    lst_p = mem_sub.add_parser("list", help="elenca memorie della KB")
+    lst_p.add_argument("kb", help="nome della KB")
+    lst_p.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default=None)
+    lst_p.add_argument("--status", choices=("active", "superseded", "deprecated"), default=None)
+    lst_p.set_defaults(func=cmd_memory_list)
+
+    dep_p = mem_sub.add_parser("deprecate", help="invalida o marca superata una memoria")
+    dep_p.add_argument("kb", help="nome della KB")
+    dep_p.add_argument("memory_id", help="ID della memoria")
+    dep_p.add_argument("--reason", default="", help="motivo della deprecazione")
+    dep_p.add_argument("--superseded-by", default=None, help="ID della nuova memoria che la sostituisce")
+    dep_p.set_defaults(func=cmd_memory_deprecate)
+
+    # import-archive command
+    imp_p = sub.add_parser("import-archive", help="importa e normalizza archivi chat/dati (ZIP/JSON)")
+    imp_p.add_argument("kb", help="nome della KB")
+    imp_p.add_argument("archive", help="percorso file zip o cartella esportata")
+    imp_p.add_argument("--format", choices=("auto", "chatgpt", "claude", "gemini", "generic"), default="auto")
+    imp_p.set_defaults(func=cmd_import_archive)
+
+    # hook command
+    hook_parser = sub.add_parser("hook", help="hook per coding agents (pre-prompt e post-session)")
+    hook_sub = hook_parser.add_subparsers(dest="hook_cmd", required=True)
+
+    hinj_p = hook_sub.add_parser("inject", help="genera blocco di contesto pre-prompt da memorie attive")
+    hinj_p.add_argument("--kb", default="agent-memory", help="nome KB")
+    hinj_p.add_argument("--prompt", default="", help="prompt utente")
+    hinj_p.set_defaults(func=cmd_hook_inject)
+
+    hcap_p = hook_sub.add_parser("capture", help="cattura log/decisioni post-sessione")
+    hcap_p.add_argument("--kb", default="agent-memory", help="nome KB")
+    hcap_p.add_argument("--transcript", default=None)
+    hcap_p.add_argument("--text", default=None)
+    hcap_p.add_argument("--session-id", default=None)
+    hcap_p.set_defaults(func=cmd_hook_capture)
+
+    hinst_p = hook_sub.add_parser("install", help="installa configurazione hook nel client specificato")
+    hinst_p.add_argument("--client", choices=("claude-code", "cursor", "codex", "antigravity"), default="claude-code")
+    hinst_p.add_argument("--kb", default="agent-memory")
+    hinst_p.add_argument("--project-dir", default=None)
+    hinst_p.set_defaults(func=cmd_hook_install)
 
     return parser
 

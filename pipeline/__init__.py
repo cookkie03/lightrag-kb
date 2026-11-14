@@ -21,13 +21,13 @@ from pipeline.ingestion_worker import (
     IngestionWorker,
     JobLockedError,
     SafetyGuardViolationError,
-    StagedAction,
-    StagedJobManifest,
+    create_staged_action,
+    create_staged_job_manifest,
 )
 from pipeline.parsers import (
-    ParsedDocument,
     compute_file_sha256,
     compute_text_sha256,
+    create_parsed_document,
     get_file_category,
     parse_document,
     save_derived_artifacts,
@@ -36,10 +36,12 @@ from pipeline.parsers import (
 __all__ = [
     "compute_file_sha256",
     "compute_text_sha256",
+    "create_parsed_document",
+    "create_staged_action",
+    "create_staged_job_manifest",
     "get_file_category",
     "parse_document",
     "save_derived_artifacts",
-    "ParsedDocument",
     "LightRAGClient",
     "LightRAGError",
     "LightRAGConflictError",
@@ -52,6 +54,4 @@ __all__ = [
     "IngestionWorker",
     "JobLockedError",
     "SafetyGuardViolationError",
-    "StagedAction",
-    "StagedJobManifest",
 ]

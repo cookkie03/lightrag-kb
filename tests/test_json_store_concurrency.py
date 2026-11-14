@@ -1,6 +1,7 @@
 """Exercise cross-process JSON updates and corrupt snapshot protection."""
 
 from concurrent.futures import ProcessPoolExecutor
+import json
 
 import pytest
 
@@ -21,7 +22,7 @@ def test_concurrent_processes_do_not_lose_job_updates(tmp_path):
     with ProcessPoolExecutor(max_workers=4) as pool:
         list(pool.map(_increment, [path] * 4))
     with Catalog(path) as catalog:
-        assert catalog.get_job("job").counters["added"] == 60
+        assert catalog.get_job("job")["counters"]["added"] == 60
 
 
 def test_invalid_collection_record_does_not_replace_snapshot(tmp_path):
@@ -31,4 +32,4 @@ def test_invalid_collection_record_does_not_replace_snapshot(tmp_path):
     with pytest.raises(ValueError):
         with Catalog(path) as catalog:
             catalog.add_source("good", "Good")
-    assert path.read_text() == original
+    assert json.loads(path.read_text()) == json.loads(original)

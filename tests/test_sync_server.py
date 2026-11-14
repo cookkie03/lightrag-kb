@@ -18,8 +18,8 @@ def test_prepare_returns_source_snapshot_and_creates_job():
         assert prepared["job_id"] == "job"
         assert prepared["scan_generation"] is None
         assert prepared["files"] == [{"path": "note.txt", "sha256": "a" * 64, "size": 10, "mtime_ns": 20}]
-        assert catalog.get_job("job").stage == "PREPARING"
-        assert catalog.get_job("job").source_id == "source"
+        assert catalog.get_job("job")["stage"] == "PREPARING"
+        assert catalog.get_job("job")["source_id"] == "source"
 
 
 def test_prepare_refuses_second_active_job():
@@ -72,9 +72,9 @@ def test_admission_returns_worker_manifest_for_unchanged_snapshot(tmp_path):
         catalog.create_job("job", "kb", source_id="source")
         manifest = {"job_id": "job", "kb_id": "kb", "source_id": "source", "origin_host": "mac", "origin_folder": "/original", "scan_generation": None, "mode": "full", "scan_complete": True, "scan_errors": [], "actions": [], "files": []}
         admitted = admit_manifest(catalog, "job", manifest, tmp_path)
-        assert admitted.mode == "full_folder"
-        assert admitted.scan_errors == 0
-        assert admitted.actions == []
+        assert admitted["mode"] == "full_folder"
+        assert admitted["scan_errors"] == 0
+        assert admitted["actions"] == []
         catalog.update_source_scan("source", "new-generation")
         with pytest.raises(ValueError, match="generation"):
             admit_manifest(catalog, "job", manifest, tmp_path)
@@ -103,7 +103,7 @@ def test_admission_rejects_delete_not_supported_by_snapshot(tmp_path):
         manifest = {"job_id": "job", "kb_id": "kb", "source_id": "source", "origin_host": "mac", "origin_folder": "/original", "scan_generation": None, "mode": "full", "scan_complete": True, "scan_errors": [], "actions": [{"action": "delete", "path": "keep.txt"}], "files": [{"path": "keep.txt", "sha256": "a" * 64, "size": 1, "mtime_ns": 1}]}
         with pytest.raises(ValueError, match="delta"):
             admit_manifest(catalog, "job", manifest, tmp_path)
-        assert catalog.get_file("source", "keep.txt").active
+        assert catalog.get_file("source", "keep.txt")["active"]
 
 
 def test_partial_sync_cannot_request_deletion(tmp_path):

@@ -31,10 +31,6 @@ from storage.catalog import (
     VALID_JOB_STAGES,
     VALID_SOURCE_MODES,
     Catalog,
-    DocumentRecord,
-    FileRecord,
-    JobRecord,
-    SourceRecord,
     generate_canonical_doc_id,
 )
 
@@ -63,7 +59,7 @@ def test_catalog_init_memory_and_file(tmp_path: Path):
     with Catalog(":memory:") as cat:
         assert cat.path is None
         cat.add_source("local", "Local")
-        assert cat.get_source("local").name == "Local"
+        assert cat.get_source("local")["name"] == "Local"
 
     db_path = tmp_path / "test_kb" / "catalog.json"
     with Catalog(db_path) as cat:
@@ -117,18 +113,18 @@ def test_source_lifecycle(memory_catalog: Catalog):
         deletion_policy="guarded",
         status="active",
     )
-    assert src.id == "mac-brain"
-    assert src.name == "MacBook Second Brain"
-    assert src.include_patterns == ["*.md", "*.pdf"]
-    assert src.exclude_patterns == [".git/*", "*.tmp"]
-    assert src.mode == "full_folder"
-    assert src.last_complete_scan_id is None
+    assert src["id"] == "mac-brain"
+    assert src["name"] == "MacBook Second Brain"
+    assert src["include_patterns"] == ["*.md", "*.pdf"]
+    assert src["exclude_patterns"] == [".git/*", "*.tmp"]
+    assert src["mode"] == "full_folder"
+    assert src["last_complete_scan_id"] is None
 
     # Retrieve source
     fetched = cat.get_source("mac-brain")
     assert fetched is not None
-    assert fetched.id == src.id
-    assert fetched.to_dict()["name"] == "MacBook Second Brain"
+    assert fetched["id"] == src["id"]
+    assert fetched["name"] == "MacBook Second Brain"
 
     # Non-existent source
     assert cat.get_source("non-existent") is None
@@ -144,19 +140,19 @@ def test_source_lifecycle(memory_catalog: Catalog):
         include_patterns=["*.txt"],
         status="paused",
     )
-    assert updated.name == "Updated Name"
-    assert updated.include_patterns == ["*.txt"]
-    assert updated.status == "paused"
+    assert updated["name"] == "Updated Name"
+    assert updated["include_patterns"] == ["*.txt"]
+    assert updated["status"] == "paused"
 
     # Update source scan id
     scanned = cat.update_source_scan("mac-brain", "scan-2026-11-06-001")
-    assert scanned.last_complete_scan_id == "scan-2026-11-06-001"
+    assert scanned["last_complete_scan_id"] == "scan-2026-11-06-001"
 
     # List sources with and without filter
     cat.add_source("nas-archive", "NAS Archive", mode="selected_files", status="active")
     assert len(cat.list_sources()) == 2
     assert len(cat.list_sources(status="active")) == 1
-    assert cat.list_sources(status="active")[0].id == "nas-archive"
+    assert cat.list_sources(status="active")[0]["id"] == "nas-archive"
     assert len(cat.list_sources(status="paused")) == 1
 
     # Delete source
@@ -183,9 +179,9 @@ def test_document_lifecycle_and_reference_counts(memory_catalog: Catalog):
         lightrag_status="PROCESSED",
         parser_version="docling-v1.0",
     )
-    assert doc.canonical_doc_id == "doc_canon_100"
-    assert doc.lightrag_status == "PROCESSED"
-    assert doc.reference_count == 0
+    assert doc["canonical_doc_id"] == "doc_canon_100"
+    assert doc["lightrag_status"] == "PROCESSED"
+    assert doc["reference_count"] == 0
 
     # Lookups by lightrag_doc_id and derived_hash
     assert cat.get_document_by_lightrag_id("lr_doc_100") is not None
@@ -205,7 +201,7 @@ def test_document_lifecycle_and_reference_counts(memory_catalog: Catalog):
     )
     doc = cat.get_document("doc_canon_100")
     assert doc is not None
-    assert doc.reference_count == 1
+    assert doc["reference_count"] == 1
     assert cat.get_document_reference_count("doc_canon_100") == 1
 
     # Add duplicate file 2 (alias) referencing same canonical doc
@@ -245,8 +241,8 @@ def test_update_document_status(memory_catalog: Catalog):
     cat.upsert_document("doc_status_test", lightrag_status="PENDING")
 
     updated = cat.update_document_status("doc_status_test", "PROCESSED", lightrag_doc_id="lr_id_999")
-    assert updated.lightrag_status == "PROCESSED"
-    assert updated.lightrag_doc_id == "lr_id_999"
+    assert updated["lightrag_status"] == "PROCESSED"
+    assert updated["lightrag_doc_id"] == "lr_id_999"
 
     with pytest.raises(KeyError):
         cat.update_document_status("non_existent_doc", "FAILED")
@@ -272,10 +268,10 @@ def test_file_lifecycle_and_unique_constraint(memory_catalog: Catalog):
         active=True,
         last_seen_scan_id="scan-1",
     )
-    assert f.source_id == "src1"
-    assert f.relative_path == "research/paper.pdf"
-    assert f.active is True
-    initial_id = f.id
+    assert f["source_id"] == "src1"
+    assert f["relative_path"] == "research/paper.pdf"
+    assert f["active"] is True
+    initial_id = f["id"]
 
     # Foreign key enforcement: non-existent canonical doc raises IntegrityError
     with pytest.raises(ValueError):
@@ -302,11 +298,11 @@ def test_file_lifecycle_and_unique_constraint(memory_catalog: Catalog):
         active=True,
         last_seen_scan_id="scan-2",
     )
-    assert f_updated.id == initial_id
-    assert f_updated.binary_sha256 == "sha_abc_2_changed"
-    assert f_updated.size == 5500
-    assert f_updated.canonical_doc_id == "doc_new_canon"
-    assert f_updated.last_seen_scan_id == "scan-2"
+    assert f_updated["id"] == initial_id
+    assert f_updated["binary_sha256"] == "sha_abc_2_changed"
+    assert f_updated["size"] == 5500
+    assert f_updated["canonical_doc_id"] == "doc_new_canon"
+    assert f_updated["last_seen_scan_id"] == "scan-2"
 
     # List files
     all_files = cat.list_files("src1")
@@ -315,7 +311,7 @@ def test_file_lifecycle_and_unique_constraint(memory_catalog: Catalog):
     # Find by hash
     matches = cat.find_files_by_hash("sha_abc_2_changed")
     assert len(matches) == 1
-    assert matches[0].relative_path == "research/paper.pdf"
+    assert matches[0]["relative_path"] == "research/paper.pdf"
 
     # Hard delete
     assert cat.delete_file_record("src1", "research/paper.pdf") is True
@@ -340,9 +336,9 @@ def test_file_rename_preserves_mapping(memory_catalog: Catalog):
 
     # Rename file
     renamed = cat.rename_file("src1", "old_folder/my_doc.md", "new_folder/my_doc.md")
-    assert renamed.relative_path == "new_folder/my_doc.md"
-    assert renamed.canonical_doc_id == "doc_stable_id"
-    assert renamed.binary_sha256 == "stable_sha256"
+    assert renamed["relative_path"] == "new_folder/my_doc.md"
+    assert renamed["canonical_doc_id"] == "doc_stable_id"
+    assert renamed["binary_sha256"] == "stable_sha256"
 
     # Old path must not exist
     assert cat.get_file("src1", "old_folder/my_doc.md") is None
@@ -407,7 +403,7 @@ def test_collision_same_filename_different_folders_and_evidence(memory_catalog: 
     file_a = cat.get_file("src_mac", "a/report.pdf")
     file_b = cat.get_file("src_mac", "b/report.pdf")
     assert file_a is not None and file_b is not None
-    assert file_a.id != file_b.id
+    assert file_a["id"] != file_b["id"]
 
     # Evidence resolution resolves both paths
     evidence = cat.resolve_evidence("doc_shared_report")
@@ -496,19 +492,19 @@ def test_job_lifecycle_and_idempotency(memory_catalog: Catalog):
         warnings=["Non-fatal encoding warning"],
         resume_marker="marker_phase_1",
     )
-    assert job.job_id == "job-uuid-001"
-    assert job.stage == "PREPARING"
-    assert job.idempotency_key == "idem-key-abc-123"
-    assert job.counters["added"] == 1
-    assert job.counters["unchanged"] == 5
-    assert job.counters["deleted"] == 0
-    assert job.warnings == ["Non-fatal encoding warning"]
-    assert job.resume_marker == "marker_phase_1"
+    assert job["job_id"] == "job-uuid-001"
+    assert job["stage"] == "PREPARING"
+    assert job["idempotency_key"] == "idem-key-abc-123"
+    assert job["counters"]["added"] == 1
+    assert job["counters"]["unchanged"] == 5
+    assert job["counters"]["deleted"] == 0
+    assert job["warnings"] == ["Non-fatal encoding warning"]
+    assert job["resume_marker"] == "marker_phase_1"
 
     # Lookup by idempotency key
     found = cat.get_job_by_idempotency_key("idem-key-abc-123")
     assert found is not None
-    assert found.job_id == "job-uuid-001"
+    assert found["job_id"] == "job-uuid-001"
 
     # Duplicate idempotency key must raise IntegrityError (§4 idempotency)
     with pytest.raises(ValueError):
@@ -531,9 +527,9 @@ def test_job_lifecycle_and_idempotency(memory_catalog: Catalog):
             stage=s,
             counters={"added": 3, "modified": 1},
         )
-        assert updated.stage == s
-        assert updated.counters["added"] == 3
-        assert updated.counters["modified"] == 1
+        assert updated["stage"] == s
+        assert updated["counters"]["added"] == 3
+        assert updated["counters"]["modified"] == 1
 
     # Update error summary and review
     review_job = cat.update_job(
@@ -541,8 +537,8 @@ def test_job_lifecycle_and_idempotency(memory_catalog: Catalog):
         stage="NEEDS_REVIEW",
         error_summary="Deletes exceeded 20% guard threshold",
     )
-    assert review_job.stage == "NEEDS_REVIEW"
-    assert review_job.error_summary == "Deletes exceeded 20% guard threshold"
+    assert review_job["stage"] == "NEEDS_REVIEW"
+    assert review_job["error_summary"] == "Deletes exceeded 20% guard threshold"
 
     # List jobs
     assert len(cat.list_jobs(kb_id="kb-default")) == 1
@@ -609,11 +605,11 @@ def test_scan_reconciliation_unseen_files(memory_catalog: Catalog):
     # Mark unseen files inactive
     deactivated = cat.mark_files_inactive_not_seen("src1", "scan-2")
     assert len(deactivated) == 1
-    assert deactivated[0].relative_path == "delete_me.txt"
+    assert deactivated[0]["relative_path"] == "delete_me.txt"
 
     # Verify status in database
-    assert cat.get_file("src1", "keep.txt").active is True
-    assert cat.get_file("src1", "delete_me.txt").active is False
+    assert cat.get_file("src1", "keep.txt")["active"] is True
+    assert cat.get_file("src1", "delete_me.txt")["active"] is False
 
 
 # -----------------------------------------------------------------------------
@@ -625,13 +621,13 @@ def test_transaction_commit_and_rollback(disk_catalog: Catalog):
     cat = disk_catalog
 
     # Commit succeeds
-    with cat.transaction():
+    with cat.transaction() as data:
         cat.add_source("src_tx", "Transaction Source")
     assert cat.get_source("src_tx") is not None
 
     # Rollback on exception
     with pytest.raises(RuntimeError):
-        with cat.transaction():
+        with cat.transaction() as data:
             cat.add_source("src_fail", "Fail Source")
             raise RuntimeError("Forced abort")
 

@@ -69,4 +69,4 @@ def test_prepare_cli_returns_job_and_snapshot(tmp_path, monkeypatch, capsys):
     assert result["ok"] is True
     assert result["source"] == "source"
     with Catalog.open_for_kb("kb", tmp_path) as catalog:
-        assert catalog.get_job(result["job_id"]).stage == "PREPARING"
+        assert catalog.get_job(result["job_id"])["stage"] == "PREPARING"
