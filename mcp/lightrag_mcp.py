@@ -36,7 +36,7 @@ args, _ = parser.parse_known_args()
 registry = load_registry()
 kb = find_kb(registry, args.kb)
 if not kb:
-    raise SystemExit(f"KB '{args.kb}' non trovata.")
+    raise SystemExit(f"KB '{args.kb}' not found.")
 
 PORT = kb["port"]
 BASE = f"http://127.0.0.1:{PORT}"
@@ -66,7 +66,7 @@ def _normalize_strategy(strategy: str | None) -> str:
     mode = STRATEGY_TO_MODE.get(strategy)
     if mode is None:
         allowed = ", ".join(sorted(STRATEGY_TO_MODE))
-        raise ValueError(f"Strategia non valida: {strategy}. Valori ammessi: {allowed}.")
+        raise ValueError(f"Invalid strategy: {strategy}. Allowed values: {allowed}.")
     return mode
 
 
@@ -88,9 +88,9 @@ def _normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
     unknown = sorted(set(context) - allowed)
     if unknown:
         raise ValueError(
-            "Parametri context non riconosciuti: "
+            "Unrecognized context parameters: "
             + ", ".join(unknown)
-            + ". Campi ammessi: "
+            + ". Allowed fields: "
             + ", ".join(sorted(allowed))
             + "."
         )
@@ -113,8 +113,8 @@ def _ensure_server() -> str | None:
     if _server_up():
         return None
     return (
-        f"⚠ Il server della KB '{KB_NAME}' non è attivo su :{PORT}. "
-        f"Avvialo con `ragcli start {KB_NAME}`."
+        f"⚠ Server for KB '{KB_NAME}' is not running on :{PORT}. "
+        f"Start it with `ragcli start {KB_NAME}`."
     )
 
 
@@ -188,10 +188,10 @@ def find_documents(
 ) -> str:
     if sort_field not in DOCUMENT_SORT_FIELDS:
         allowed = ", ".join(sorted(DOCUMENT_SORT_FIELDS))
-        raise ValueError(f"sort_field non valido: {sort_field}. Valori ammessi: {allowed}.")
+        raise ValueError(f"Invalid sort_field: {sort_field}. Allowed values: {allowed}.")
     if sort_direction not in SORT_DIRECTIONS:
         allowed = ", ".join(sorted(SORT_DIRECTIONS))
-        raise ValueError(f"sort_direction non valido: {sort_direction}. Valori ammessi: {allowed}.")
+        raise ValueError(f"Invalid sort_direction: {sort_direction}. Allowed values: {allowed}.")
     data = _post(
         "/documents/paginated",
         {

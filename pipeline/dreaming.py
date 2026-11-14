@@ -317,7 +317,7 @@ def find_conflicting_decisions(memories: list[MemoryRecord]) -> list[tuple[Memor
             shared_tags = set(older.tags) & set(newer.tags)
 
             if (sim > 0.65) or (overrides and (shared_tags or sim > 0.4)):
-                reason = f"Decisione più recente ({newer.id}) sovrascrive o contrasta con {older.id} (sim: {sim:.2f})"
+                reason = f"More recent decision ({newer.id}) overrides or conflicts with {older.id} (sim: {sim:.2f})"
                 conflicts.append((older, newer, reason))
 
     return conflicts

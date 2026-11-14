@@ -277,6 +277,9 @@ if [ "$OS_NAME" = "Linux" ]; then
   echo "==> Installing systemd --user units"
   "$ENGINE_PY" bin/ragcli.py service install-units
   systemctl --user daemon-reload
+  if [ -f "$HOME/.config/systemd/user/lightrag-dreaming.timer" ]; then
+    systemctl --user enable --now lightrag-dreaming.timer
+  fi
 
   if [ -n "${PUBLIC_MCP_KB:-}" ]; then
     if kb_exists "$PUBLIC_MCP_KB"; then

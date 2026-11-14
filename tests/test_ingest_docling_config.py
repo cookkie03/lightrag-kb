@@ -114,5 +114,5 @@ def test_docling_visual_defaults_to_linux_easyocr_and_cpu(monkeypatch):
 
 
 def test_docling_accelerator_device_rejects_unsupported_explicit_value():
-    with pytest.raises(RuntimeError, match="DOCLING_ACCELERATOR non supportato"):
+    with pytest.raises(RuntimeError, match="Unsupported DOCLING_ACCELERATOR"):
         ingest._docling_accelerator_device({"DOCLING_ACCELERATOR": "typo"})

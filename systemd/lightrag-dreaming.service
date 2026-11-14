@@ -1,0 +1,7 @@
+[Unit]
+Description=Run LightRAG memory dreaming across all KBs
+
+[Service]
+Type=oneshot
+WorkingDirectory=__HOME__
+ExecStart=__ENGINE_PYTHON__ __REPO_ROOT__/bin/ragcli.py memory dream --all

@@ -70,7 +70,7 @@ class TransientConflictError(LightRAGConflictError):
 class UnverifiedDuplicateError(LightRAGConflictError):
     """Raised when LightRAG claims duplicate/already exists but server verification fails.
 
-    §5: 'non considerare 409 duplicato senza prova.'
+    §5: 'do not consider 409 duplicate without proof.'
     """
 
 
@@ -123,7 +123,7 @@ def create_index_result(
 
 
 class KBWriterLock:
-    """Advisory single-writer lock per Knowledge Base (§5: 'un solo writer per KB').
+    """Advisory single-writer lock per Knowledge Base (§5: 'single writer per KB').
 
     Uses POSIX advisory locking (fcntl.flock) on a persistent lock file.
     Supports re-entrant acquisition within the same process.
@@ -346,7 +346,7 @@ class LightRAGClient:
                     if attempt <= retries:
                         sleep_s = backoff_base * (2 ** (attempt - 1))
                         logger.info(
-                            "Pipeline occupata (409) su '%s'. Riprovo in %.1fs (%d/%d)...",
+                            "Pipeline busy (409) on '%s'. Retrying in %.1fs (%d/%d)...",
                             file_source,
                             sleep_s,
                             attempt,
@@ -771,7 +771,7 @@ class ProtectedIndexer:
             # -----------------------------------------------------------------
             if old_ref_count > 1:
                 logger.info(
-                    "Documento '%s' condiviso da %d alias: creo nuovo canonical doc senza toccare il vecchio.",
+                    "Document '%s' shared by %d aliases: creating new canonical doc without touching the old one.",
                     old_canonical_id,
                     old_ref_count,
                 )

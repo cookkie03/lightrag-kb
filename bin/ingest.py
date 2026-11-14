@@ -85,7 +85,7 @@ def _looks_garbled(text: str, threshold: float = 0.15) -> bool:
 def _run_docling(py: str, code: str, timeout: int, label: str) -> str:
     result = subprocess.run([py, "-c", code], capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
-        raise RuntimeError(f"{label} fallito: {result.stderr[-500:]}")
+        raise RuntimeError(f"{label} failed: {result.stderr[-500:]}")
     return result.stdout
 
 
@@ -178,16 +178,16 @@ def _insert_content(item: dict, data_dir: Path) -> str:
         return read_text_file(item["path"])
     artifact_rel = item["entry"].get("artifact_rel")
     if not artifact_rel:
-        raise RuntimeError("manca artifact_rel per il contenuto derivato")
+        raise RuntimeError("artifact_rel is missing for derived content")
     artifact = data_dir / artifact_rel
     if not artifact.exists():
-        raise RuntimeError(f"artifatto derivato mancante: {artifact_rel}")
+        raise RuntimeError(f"derived artifact is missing: {artifact_rel}")
     return artifact.read_text(errors="replace")
 
 
 def _classify_insert_failure(exc: Exception) -> str:
     text = str(exc).lower()
-    if "pipeline occupata" in text or "409" in text or "timed out" in text or "timeout" in text or "connection" in text:
+    if "pipeline busy" in text or "pipeline occupata" in text or "409" in text or "timed out" in text or "timeout" in text or "connection" in text:
         return "transient"
     return "failed"
 
@@ -211,7 +211,7 @@ def _docling_probe_text(path: Path, py: str, timeout: int) -> str:
         "sys.stdout.write(doc.export_to_markdown())\n"
     )
     try:
-        return _run_docling(py, code, timeout, f"probe Docling su {path.name}")
+        return _run_docling(py, code, timeout, f"probe Docling on {path.name}")
     except Exception:
         return ""
 
@@ -253,7 +253,7 @@ def _docling_accelerator_device(env: dict[str, str]) -> str:
         return "MPS"
     if configured == "cuda":
         return "CUDA"
-    raise RuntimeError(f"DOCLING_ACCELERATOR non supportato: {configured}")
+    raise RuntimeError(f"Unsupported DOCLING_ACCELERATOR: {configured}")
 
 
 def _docling_visual_options_code(
@@ -275,7 +275,7 @@ def _docling_visual_options_code(
             "RapidOcrOptions",
             f"RapidOcrOptions(lang={langs!r}, force_full_page_ocr={force_full_page!r})",
         )
-    raise RuntimeError(f"DOCLING_OCR_ENGINE non supportato: {engine}")
+    raise RuntimeError(f"Unsupported DOCLING_OCR_ENGINE: {engine}")
 
 
 def _docling_asr_model_symbol(env: dict[str, str]) -> str:
@@ -287,7 +287,7 @@ def _docling_asr_model_symbol(env: dict[str, str]) -> str:
     }
     engine = _docling_asr_engine(env)
     if engine not in mapping:
-        raise RuntimeError(f"DOCLING_ASR_ENGINE non supportato: {engine}")
+        raise RuntimeError(f"Unsupported DOCLING_ASR_ENGINE: {engine}")
     return mapping[engine]
 
 
@@ -344,12 +344,12 @@ def render_docling_visual(path: Path, env: dict[str, str]) -> str:
 
     accelerator_device = _docling_accelerator_device(env)
     try:
-        return _run_docling(py, _code(accelerator_device), timeout, f"Docling visual su {path.name}")
+        return _run_docling(py, _code(accelerator_device), timeout, f"Docling visual on {path.name}")
     except Exception as exc:
         if accelerator_device != "MPS" or not _is_mps_unsupported(exc):
             raise
-        print(f"    ⚠ Docling su {path.name}: MPS non supportato da questo modello, fallback a CPU")
-        return _run_docling(py, _code("CPU"), timeout, f"Docling visual (CPU fallback) su {path.name}")
+        print(f"    ⚠ Docling on {path.name}: MPS is not supported by this model, falling back to CPU")
+        return _run_docling(py, _code("CPU"), timeout, f"Docling visual (CPU fallback) on {path.name}")
 
 
 def render_docling_native(path: Path, env: dict[str, str]) -> str:
@@ -362,12 +362,12 @@ def render_docling_native(path: Path, env: dict[str, str]) -> str:
         f"doc = DocumentConverter().convert(_P({str(path)!r})).document\n"
         "sys.stdout.write(doc.export_to_markdown())\n"
     )
-    return _run_docling(py, code, timeout, f"Docling native su {path.name}")
+    return _run_docling(py, code, timeout, f"Docling native on {path.name}")
 
 
 def render_docling_audio(path: Path, env: dict[str, str]) -> str:
     if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg non trovato sul PATH. Installa con `brew install ffmpeg`.")
+        raise RuntimeError("ffmpeg not found on PATH. Install it with `brew install ffmpeg`.")
     py = env["DOCLING_PYTHON"]
     timeout = int(env.get("DOCLING_TIMEOUT", "3600"))
     language = next((item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()), "en")
@@ -393,7 +393,7 @@ def render_docling_audio(path: Path, env: dict[str, str]) -> str:
         f"doc = converter.convert(_P({str(path)!r})).document\n"
         "sys.stdout.write(doc.export_to_markdown())\n"
     )
-    return _run_docling(py, code, timeout, f"Docling audio/video su {path.name}")
+    return _run_docling(py, code, timeout, f"Docling audio/video on {path.name}")
 
 
 # Accept the document-list shapes returned by different server versions.
@@ -427,13 +427,13 @@ def fetch_kb_docs(port: int, page_size: int = 50) -> dict[str, list[str]] | None
                 timeout=60,
             )
             if response.status_code == 404:
-                raise RuntimeError("endpoint paginato non disponibile")
+                raise RuntimeError("paginated endpoint is unavailable")
             response.raise_for_status()
             rows = _document_rows(response.json())
             if not rows:
                 if saw_any_page:
                     break
-                raise RuntimeError("risposta paginata vuota")
+                raise RuntimeError("empty paginated response")
             saw_any_page = True
             for item in rows:
                 file_path = item.get("file_path")
@@ -449,7 +449,7 @@ def fetch_kb_docs(port: int, page_size: int = 50) -> dict[str, list[str]] | None
             response = requests.get(f"http://127.0.0.1:{port}/documents", timeout=60)
             response.raise_for_status()
         except Exception as exc:
-            print(f"  ⚠ impossibile leggere i documenti del KB ({exc}): mirror disattivato per questo run.")
+            print(f"  ⚠ unable to read KB documents ({exc}): mirror disabled for this run.")
             return None
         statuses = response.json().get("statuses", {})
         for bucket in statuses.values():
@@ -473,7 +473,7 @@ def delete_docs(port: int, doc_ids: list[str]) -> bool:
         response.raise_for_status()
         return True
     except Exception as exc:
-        print(f"    ⚠ cancellazione doc fallita ({exc}); proseguo.")
+        print(f"    ⚠ document deletion failed ({exc}); continuing.")
         return False
 
 
@@ -495,12 +495,12 @@ def insert_text(port: int, text: str, source: str, retries: int = 8) -> str:
                 return "exists"
             wait = min(10 * 2 ** (attempt - 1), 300)
             if attempt <= retries:
-                print(f"    ⏳ pipeline occupata (409) su {source}, riprovo in {wait}s ({attempt}/{retries})…")
+                print(f"    ⏳ pipeline busy (409) for {source}, retrying in {wait}s ({attempt}/{retries})…")
                 time.sleep(wait)
                 continue
         response.raise_for_status()
         return "ok"
-    raise RuntimeError("pipeline occupata: troppi 409 consecutivi")
+    raise RuntimeError("pipeline busy: too many consecutive 409 responses")
 
 
 def load_manifest(path: Path) -> dict[str, dict]:
@@ -620,7 +620,7 @@ def render_content(path: Path, env: dict[str, str]) -> tuple[str, str | None]:
         return render_docling_native(path, env), category
     if ext in AUDIO_VIDEO_EXT:
         return render_docling_audio(path, env), category
-    raise RuntimeError(f"Estensione non supportata: {path.suffix}")
+    raise RuntimeError(f"Unsupported extension: {path.suffix}")
 
 
 def _render_phase(
@@ -665,13 +665,13 @@ def _render_phase(
                 ensure_parent(out_path)
                 out_path.write_text(content)
                 artifact_rel = out_path.relative_to(data_dir).as_posix()
-                _log("  salvato derivato", rel, artifact_rel)
+                _log("  saved derived artifact", rel, artifact_rel)
                 old_artifact_rel = entry.get("artifact_rel")
                 if old_artifact_rel and old_artifact_rel != artifact_rel:
                     old_artifact = data_dir / old_artifact_rel
                     if old_artifact.exists():
                         old_artifact.unlink()
-                        _log("  rimosso derivato vecchio", rel, old_artifact_rel)
+                        _log("  removed old derived artifact", rel, old_artifact_rel)
             elif category == "text":
                 artifact_rel = None
             entry.update(
@@ -694,7 +694,7 @@ def _render_phase(
                     "last_error": str(exc),
                 }
             )
-            print(f"✗ render fallito '{rel}': {exc}")
+            print(f"✗ render failed '{rel}': {exc}")
     save_manifest(derived_dir / "manifests" / "sync.json", manifest)
     return render_failed
 
@@ -721,7 +721,7 @@ def _insert_phase(
         source_changed = item["source_changed"]
         try:
             if (source_changed or item["force"]) and kb_docs is not None and rel in kb_docs:
-                _log("↻ rimuovo vecchia versione", rel)
+                _log("↻ removing old version", rel)
                 delete_docs(port, kb_docs.get(rel, []))
             content = _insert_content(item, data_dir)
             result = insert_text(port, content, rel)
@@ -746,19 +746,19 @@ def _insert_phase(
                 entry["last_error"] = None
                 if item["is_new"]:
                     inserted_added += 1
-                    _log("✓ inserito", rel)
+                    _log("✓ inserted", rel)
                 else:
                     inserted_updated += 1
-                    _log("✓ aggiornato", rel)
+                    _log("✓ updated", rel)
         except Exception as exc:
             status = _classify_insert_failure(exc)
             entry["insert_status"] = status
             entry["last_error"] = str(exc)
             if status == "transient":
                 transient.append(item)
-                print(f"↻ insert in attesa '{rel}': {exc}")
+                print(f"↻ insert pending '{rel}': {exc}")
             else:
-                print(f"✗ insert fallito '{rel}': {exc}")
+                print(f"✗ insert failed '{rel}': {exc}")
     save_manifest(derived_dir / "manifests" / "sync.json", manifest)
     return inserted_added, inserted_updated, transient
 
@@ -773,7 +773,7 @@ def _retry_transient_inserts(
 ) -> tuple[int, int]:
     if not transient:
         return 0, 0
-    print("\n[insert:retry] passaggio finale sui transient")
+    print("\n[insert:retry] final pass for transient failures")
     time.sleep(5)
     added = updated = 0
     retry_queue = sorted(transient, key=lambda item: (_insert_priority(item["category"]), item["rel"]))
@@ -782,7 +782,7 @@ def _retry_transient_inserts(
         entry = item["entry"]
         try:
             if (item["source_changed"] or item["force"]) and kb_docs is not None and rel in kb_docs:
-                _log("↻ rimuovo vecchia versione", rel)
+                _log("↻ removing old version", rel)
                 delete_docs(port, kb_docs.get(rel, []))
             content = _insert_content(item, data_dir)
             result = insert_text(port, content, rel)
@@ -799,30 +799,30 @@ def _retry_transient_inserts(
                 entry["last_error"] = None
                 if item["is_new"]:
                     added += 1
-                    _log("✓ inserito", rel)
+                    _log("✓ inserted", rel)
                 else:
                     updated += 1
-                    _log("✓ aggiornato", rel)
+                    _log("✓ updated", rel)
         except Exception as exc:
             entry["insert_status"] = "failed"
             entry["last_error"] = str(exc)
-            print(f"✗ retry fallito '{rel}': {exc}")
+            print(f"✗ retry failed '{rel}': {exc}")
     save_manifest(derived_dir / "manifests" / "sync.json", manifest)
     return added, updated
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Sync incrementale di una KB LightRAG con sorgente reale + derived Docling."
+        description="Incremental sync of a LightRAG KB with the real source and derived Docling artifacts."
     )
     parser.add_argument("--kb", required=True)
-    parser.add_argument("--force", action="store_true", help="rigenera cache, derivati e riallinea la KB")
-    parser.add_argument("--pipelines", help="Categorie di pipeline abilitate separate da virgola (text,pdf,images,office,audio)")
-    parser.add_argument("--no-text", action="store_true", help="Disabilita la pipeline di testo e codice")
-    parser.add_argument("--no-pdf", action="store_true", help="Disabilita la pipeline per documenti PDF")
-    parser.add_argument("--no-images", action="store_true", help="Disabilita la pipeline per immagini")
-    parser.add_argument("--no-office", action="store_true", help="Disabilita la pipeline per documenti Office/ODF/EPUB")
-    parser.add_argument("--no-audio", action="store_true", help="Disabilita la pipeline per file audio/video")
+    parser.add_argument("--force", action="store_true", help="regenerate cache and derived artifacts, then realign the KB")
+    parser.add_argument("--pipelines", help="comma-separated enabled pipeline categories (text,pdf,images,office,audio)")
+    parser.add_argument("--no-text", action="store_true", help="disable the text and code pipeline")
+    parser.add_argument("--no-pdf", action="store_true", help="disable the PDF document pipeline")
+    parser.add_argument("--no-images", action="store_true", help="disable the image pipeline")
+    parser.add_argument("--no-office", action="store_true", help="disable the Office/ODF/EPUB pipeline")
+    parser.add_argument("--no-audio", action="store_true", help="disable the audio/video pipeline")
     args = parser.parse_args()
 
     env = global_env()
@@ -849,13 +849,13 @@ def main() -> None:
 
     disabled_pipelines = all_categories - enabled_pipelines
     if disabled_pipelines:
-        print(f"Pipelines disabilitate: {', '.join(sorted(disabled_pipelines))}")
-    print(f"Pipelines attive: {', '.join(sorted(enabled_pipelines))}")
+        print(f"Disabled pipelines: {', '.join(sorted(disabled_pipelines))}")
+    print(f"Enabled pipelines: {', '.join(sorted(enabled_pipelines))}")
 
     registry = load_registry(env)
     kb = find_kb(registry, args.kb)
     if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
+        sys.exit(f"KB '{args.kb}' not found.")
 
     ensure_kb_dirs(kb)
     source_dir = Path(kb["source_dir"])
@@ -864,16 +864,16 @@ def main() -> None:
     port = kb["port"]
     if not source_dir.is_dir():
         sys.exit(
-            f"⚠ Cartella sorgente non disponibile: {source_dir}\n"
-            f"  (non montata? cloud offline?) Nessuna modifica al KB."
+            f"⚠ Source directory unavailable: {source_dir}\n"
+            f"  (not mounted? cloud offline?) No changes made to KB."
         )
     try:
         if not requests.get(f"http://127.0.0.1:{port}/health", timeout=3).ok:
-            raise RuntimeError("health check fallito")
+            raise RuntimeError("health check failed")
     except Exception:
         sys.exit(
-            f"Server '{args.kb}' non attivo o non healthy. "
-            f"Esegui `ragcli stop {args.kb}`, poi `ragcli start {args.kb}`, quindi riprova."
+            f"Server '{args.kb}' is stopped or unhealthy. "
+            f"Run `ragcli stop {args.kb}`, then `ragcli start {args.kb}`, and retry."
         )
 
     if args.force:
@@ -894,7 +894,7 @@ def main() -> None:
     next_manifest: dict[str, dict] = {}
     plan: list[dict] = []
 
-    print(f"KB '{args.kb}': {len(candidates)} file candidati dalla sorgente {source_dir}")
+    print(f"KB '{args.kb}': {len(candidates)} candidate files from source {source_dir}")
     for path in candidates:
         rel = path.relative_to(source_dir).as_posix()
         present_rel.add(rel)
@@ -926,7 +926,7 @@ def main() -> None:
         ):
             next_manifest[rel] = entry
             unchanged += 1
-            _log("· invariato", rel)
+            _log("· unchanged", rel)
             continue
 
         if render_needed:
@@ -967,7 +967,7 @@ def main() -> None:
         if orphans:
             _phase_header("prune", len(orphans))
         for rel, ids in orphans.items():
-            _log("− rimuovo orfano", rel)
+            _log("− removing orphan", rel)
             if delete_docs(port, ids):
                 removed += 1
             entry = manifest.get(rel)
@@ -975,7 +975,7 @@ def main() -> None:
                 artifact = data_dir / entry["artifact_rel"]
                 if artifact.exists():
                     artifact.unlink()
-                    _log("  eliminato derivato orfano", rel, entry["artifact_rel"])
+                    _log("  removed orphan derived artifact", rel, entry["artifact_rel"])
 
     for rel, entry in manifest.items():
         if rel in next_manifest:
@@ -988,8 +988,8 @@ def main() -> None:
 
     save_manifest(manifest_path, next_manifest)
     print(
-        f"\nFatto: {added} nuovi, {updated} aggiornati, {unchanged} invariati, "
-        f"{removed} rimossi, {render_failed} render falliti, {insert_failed} insert falliti."
+        f"\nDone: {added} added, {updated} updated, {unchanged} unchanged, "
+        f"{removed} removed, {render_failed} render failures, {insert_failed} insert failures."
     )
     sys.exit(1 if (render_failed or insert_failed) else 0)
 

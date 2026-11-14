@@ -69,7 +69,7 @@ def _completed_process(args: list[str], returncode: int, stdout: str = "", stder
 def _normalize_service_name(name: str) -> str:
     normalized = name.strip()
     if not normalized:
-        raise SystemExit("Nome servizio mancante.")
+        raise SystemExit("Service name is required.")
     if "." not in normalized:
         normalized = f"{normalized}.service"
     return normalized
@@ -136,7 +136,11 @@ def install_user_units(repo_root: Path, home: Path, env: dict[str, str] | None =
     systemd_dir.mkdir(parents=True, exist_ok=True)
     context = _unit_template_context(repo_root, home, env)
     installed: list[Path] = []
-    for name in LINUX_SYSTEMD_UNITS:
+    unit_names = list(LINUX_SYSTEMD_UNITS)
+    for optional in ("lightrag-dreaming.service", "lightrag-dreaming.timer"):
+        if (repo_root / "systemd" / optional).is_file():
+            unit_names.append(optional)
+    for name in unit_names:
         src = repo_root / "systemd" / name
         text = src.read_text()
         for token, value in context.items():
@@ -159,7 +163,7 @@ def _systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        return _completed_process(cmd, 127, stderr="systemctl non trovato")
+        return _completed_process(cmd, 127, stderr="systemctl not found")
 
 
 def _journalctl_user(*args: str) -> subprocess.CompletedProcess[str]:
@@ -167,7 +171,7 @@ def _journalctl_user(*args: str) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        return _completed_process(cmd, 127, stderr="journalctl non trovato")
+        return _completed_process(cmd, 127, stderr="journalctl not found")
 
 
 def _template_unit_status(unit: str) -> dict[str, object]:
@@ -203,7 +207,7 @@ def _funnel_status(env: dict[str, str]) -> dict[str, object]:
 
     tailscale_bin = shutil.which("tailscale")
     if not tailscale_bin:
-        return {"name": "funnel", "ok": False, "details": "tailscale non trovato"}
+        return {"name": "funnel", "ok": False, "details": "tailscale not found"}
 
     result = subprocess.run([tailscale_bin, "funnel", "status"], capture_output=True, text=True)
     output = result.stdout.strip() or result.stderr.strip() or "unknown"
@@ -273,7 +277,7 @@ def cmd_service_restart(args: argparse.Namespace) -> None:
     for unit in units:
         result = _systemctl_user("restart", unit)
         if result.returncode != 0:
-            raise SystemExit(result.stderr.strip() or f"restart fallito: {unit}")
+            raise SystemExit(result.stderr.strip() or f"restart failed: {unit}")
         print(f"restarted {unit}")
 
 
@@ -315,9 +319,9 @@ def _ensure_runtime(env: dict[str, str]) -> tuple[Path, Path]:
     missing = [str(p) for p in (engine_python, server_bin) if not p.exists()]
     if missing:
         sys.exit(
-            "Runtime condiviso non pronto:\n"
-            + "\n".join(f"  - manca {item}" for item in missing)
-            + "\nEsegui `./setup.sh` per installare LightRAG + Docling nel runtime unico."
+            "Shared runtime is not ready:\n"
+            + "\n".join(f"  - missing {item}" for item in missing)
+            + "\nRun `./setup.sh` to install LightRAG + Docling in the shared runtime."
         )
     return engine_python, server_bin
 
@@ -387,8 +391,8 @@ def _safe_kb_delete_target(kb: dict) -> Path:
     if data_dir == source_data_dir or data_dir == repo_data_dir:
         return data_dir
     sys.exit(
-        f"Refuso di sicurezza: data_dir inattesa per '{kb['name']}': {data_dir}\n"
-        f"Attesi solo:\n"
+        f"Safety refusal: unexpected data_dir for '{kb['name']}': {data_dir}\n"
+        f"Only these paths are allowed:\n"
         f"  - {source_data_dir}\n"
         f"  - {repo_data_dir}"
     )
@@ -398,10 +402,10 @@ def cmd_add(args: argparse.Namespace) -> None:
     env = global_env()
     registry = load_registry(env)
     if find_kb(registry, args.name):
-        sys.exit(f"KB '{args.name}' gia esistente.")
+        sys.exit(f"KB '{args.name}' already exists.")
     source_dir = Path(args.source_dir).expanduser().resolve()
     if not source_dir.is_dir():
-        sys.exit(f"Cartella sorgente inesistente: {source_dir}")
+        sys.exit(f"Source directory does not exist: {source_dir}")
     data_dir = source_dir / ".lightrag"
     kb = {
         "name": args.name,
@@ -416,7 +420,7 @@ def cmd_add(args: argparse.Namespace) -> None:
     write_kb_env(kb, env)
     registry["kbs"].append(kb)
     save_registry(registry)
-    print(f"KB '{args.name}' creata.")
+    print(f"KB '{args.name}' created.")
     print(f"  source     : {kb['source_dir']}")
     print(f"  data dir   : {kb['data_dir']}")
     print(f"  rag_storage: {kb['rag_storage']}")
@@ -428,7 +432,7 @@ def cmd_add(args: argparse.Namespace) -> None:
 def cmd_list(_: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     if not registry["kbs"]:
-        print("Nessuna KB. Crea con: ragcli add <name> <source_dir>")
+        print("No KBs. Create one with: ragcli add <name> <source_dir>")
         return
     print(f"{'NAME':<22}{'PORT':<7}{'MODE':<8}{'SERVER':<8}{'EXCL':<6}SOURCE")
     for kb in registry["kbs"]:
@@ -442,7 +446,7 @@ def cmd_exclude_add(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     _canonicalize_kb_excludes(kb)
     patterns = kb.setdefault("exclude", [])
     added: list[str] = []
@@ -459,14 +463,14 @@ def cmd_exclude_add(args: argparse.Namespace) -> None:
         display, _ = canonicalize_exclude_specs(added)
         print(f"Esclusi da '{args.name}': {', '.join(display)}")
     else:
-        print(f"Nessun nuovo pattern da aggiungere per '{args.name}'.")
+        print(f"No new patterns to add for '{args.name}'.")
 
 
 def cmd_exclude_rm(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     _canonicalize_kb_excludes(kb)
     patterns = kb.get("exclude", [])
     removed: list[str] = []
@@ -483,14 +487,14 @@ def cmd_exclude_rm(args: argparse.Namespace) -> None:
     if removed:
         print(f"Rimosse esclusioni da '{args.name}': {', '.join(removed)}")
     else:
-        sys.exit(f"Nessun pattern rimosso da '{args.name}'.")
+        sys.exit(f"No patterns removed from '{args.name}'.")
 
 
 def cmd_exclude_ls(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     changed = _canonicalize_kb_excludes(kb)
     if changed:
         save_registry(registry)
@@ -498,12 +502,12 @@ def cmd_exclude_ls(args: argparse.Namespace) -> None:
     data_dir = Path(kb["data_dir"])
     patterns = kb.get("exclude", [])
     if not patterns:
-        print(f"Nessuna esclusione definita per '{args.name}'.")
+        print(f"No exclusions defined for '{args.name}'.")
         return
 
     display_patterns = expand_exclude_specs(patterns, source_dir, data_dir) if args.expanded else patterns
-    title = "Esclusioni espanse" if args.expanded else "Esclusioni"
-    print(f"{title} per '{args.name}':")
+    title = "Expanded exclusions" if args.expanded else "Exclusions"
+    print(f"{title} for '{args.name}':")
     for pattern in display_patterns:
         print(f"  - {pattern}")
 
@@ -522,18 +526,18 @@ def cmd_start(args: argparse.Namespace) -> None:
     registry = load_registry(env)
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     ensure_kb_dirs(kb)
     write_kb_env(kb, env)
     _, server_bin = _ensure_runtime(env)
     state = _kb_server_state(kb)
     if state == "up":
-        print(f"'{args.name}' gia attiva su :{kb['port']}")
+        print(f"'{args.name}' already running su :{kb['port']}")
         return
     if state == "zombie":
         sys.exit(
-            f"Server '{args.name}' non healthy ma porta :{kb['port']} occupata. "
-            f"Esegui `ragcli stop {args.name}` e poi rilancia `ragcli start {args.name}`."
+            f"Server '{args.name}' not healthy ma porta :{kb['port']} occupata. "
+            f"Run `ragcli stop {args.name}` e poi rilancia `ragcli start {args.name}`."
         )
     log_path = Path(kb["data_dir"]) / "lightrag.log"
     with log_path.open("ab") as log_handle:
@@ -558,7 +562,7 @@ def cmd_start(args: argparse.Namespace) -> None:
         )
     if not _wait_for_health(kb["port"]):
         sys.exit(
-            f"Il server di '{args.name}' non e diventato healthy. "
+            f"Il server di '{args.name}' did not become healthy. "
             f"Controlla il log in {log_path}"
         )
     print(f"Server '{args.name}' attivo su http://127.0.0.1:{kb['port']}")
@@ -568,28 +572,28 @@ def cmd_stop(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     state = _kb_server_state(kb)
     if state == "down":
-        print(f"'{args.name}' gia spenta.")
+        print(f"'{args.name}' already stopped.")
         return
     if not _stop_server(kb):
         sys.exit(
             f"Impossibile fermare '{args.name}' su :{kb['port']}. "
             f"Controlla manualmente il processo {port_pid(kb['port']) or '?'}.)"
         )
-    print(f"Server '{args.name}' fermato.")
+    print(f"Server '{args.name}' stopped.")
 
 
 def cmd_remove(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     state = _kb_server_state(kb)
     if state != "down":
         sys.exit(
-            f"Fermare prima il server di '{args.name}' con `ragcli stop {args.name}`."
+            f"Stop the server for '{args.name}' first with `ragcli stop {args.name}`."
         )
     delete_target = _safe_kb_delete_target(kb)
     mcp_warnings = _deregister_all_mcp(kb)
@@ -597,11 +601,11 @@ def cmd_remove(args: argparse.Namespace) -> None:
     save_registry(registry)
     if delete_target.exists():
         shutil.rmtree(delete_target)
-    print(f"KB '{args.name}' rimossa.")
-    print(f"  source preservata: {kb['source_dir']}")
-    print(f"  stato eliminato   : {delete_target}")
+    print(f"KB '{args.name}' removed.")
+    print(f"  source preserved: {kb['source_dir']}")
+    print(f"  deleted state   : {delete_target}")
     if mcp_warnings:
-        print("\nAvvisi durante la pulizia MCP:")
+        print("\nWarnings during MCP cleanup:")
         for warning in mcp_warnings:
             print(f"  - {warning}")
 
@@ -611,17 +615,17 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     registry = load_registry(env)
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     engine_python, _ = _ensure_runtime(env)
     state = _kb_server_state(kb)
     if state == "down":
         sys.exit(
-            f"Server '{args.name}' non attivo. Avvialo prima con `ragcli start {args.name}`."
+            f"Server '{args.name}' is not active. Start it first with `ragcli start {args.name}`."
         )
     if state == "zombie":
         sys.exit(
-            f"Server '{args.name}' non healthy su :{kb['port']}. "
-            f"Esegui `ragcli stop {args.name}`, poi `ragcli start {args.name}`, quindi riprova."
+            f"Server '{args.name}' is not healthy on :{kb['port']}. "
+            f"Run `ragcli stop {args.name}`, then `ragcli start {args.name}`, and retry."
         )
     write_kb_env(kb, env)
     cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name]
@@ -640,10 +644,10 @@ def cmd_move(args: argparse.Namespace) -> None:
     registry = load_registry(env)
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     if _kb_server_state(kb) != "down":
         sys.exit(
-            f"Fermare prima il server di '{args.name}' con `ragcli stop {args.name}`."
+            f"Stop the server for '{args.name}' first with `ragcli stop {args.name}`."
         )
     current = Path(kb["data_dir"]).resolve()
     if storage_mode(kb) == "source":
@@ -651,10 +655,10 @@ def cmd_move(args: argparse.Namespace) -> None:
     else:
         destination = (Path(kb["source_dir"]) / ".lightrag").resolve()
     if current == destination:
-        print(f"Nessuno spostamento necessario: gia in {destination}")
+        print(f"Nessuno spostamento necessario: already at {destination}")
         return
     if destination.exists() and any(destination.iterdir()):
-        sys.exit(f"Destinazione non vuota: {destination}")
+        sys.exit(f"Destination is not empty: {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     if current.exists():
         shutil.move(str(current), str(destination))
@@ -674,7 +678,7 @@ def cmd_mcp_add(args: argparse.Namespace) -> None:
     registry = load_registry(env)
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     engine_python, _ = _ensure_runtime(env)
     mcp_name = f"lightrag-{args.name}"
     clients = list(mcp_clients.CLIENTS) if args.client == "all" else [args.client]
@@ -692,7 +696,7 @@ def cmd_mcp_rm(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.name)
     if not kb:
-        sys.exit(f"KB '{args.name}' non trovata.")
+        sys.exit(f"KB '{args.name}' not found.")
     mcp_name = f"lightrag-{args.name}"
     clients = list(mcp_clients.REMOVERS) if args.client == "all" else [args.client]
     rc = 0
@@ -717,7 +721,7 @@ def cmd_sync_prepare(args: argparse.Namespace) -> None:
 
     try:
         if not find_kb(load_registry(global_env()), args.kb):
-            raise ValueError(f"KB '{args.kb}' non trovata")
+            raise ValueError(f"KB '{args.kb}' not found")
         with Catalog.open_for_kb(args.kb, KB_ROOT) as catalog:
             result = prepare_sync(catalog, args.kb, args.source, args.mode, uuid.uuid4().hex)
     except (ValueError, OSError, RuntimeError) as exc:
@@ -754,7 +758,7 @@ def cmd_memory_remember(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.kb)
     if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
+        sys.exit(f"KB '{args.kb}' not found.")
     mem = remember_memory(
         source_dir=kb["source_dir"],
         content=args.content,
@@ -766,35 +770,79 @@ def cmd_memory_remember(args: argparse.Namespace) -> None:
     print(json.dumps({"ok": True, "memory": mem.to_dict()}, indent=2, ensure_ascii=False))
 
 
+def _registry_kbs(registry: dict[str, Any]) -> list[dict[str, Any]]:
+    return list(registry.get("kbs", []))
+
+
+# Search memories across every KB by default, or only selected KBs when scoped.
 def cmd_memory_recall(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
-    kb = find_kb(registry, args.kb)
-    if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
-    results = query_memories(
-        source_dir=kb["source_dir"],
-        query=args.query,
-        memory_type=args.type,
-        active_only=not args.all,
-        top_k=args.top_k,
-    )
-    print(json.dumps({"ok": True, "count": len(results), "memories": [m.to_dict() for m in results]}, indent=2, ensure_ascii=False))
+    selected = _registry_kbs(registry)
+    legacy_kb = getattr(args, "kb_legacy", None)
+    raw_query = args.query if isinstance(args.query, str) else " ".join(args.query)
+    query_parts = [raw_query]
+    if legacy_kb and not raw_query:
+        query_parts = [legacy_kb]
+        legacy_kb = None
+    selected_kbs = args.kb or ([legacy_kb] if legacy_kb else None)
+    query = " ".join(query_parts)
+    if selected_kbs:
+        selected = [kb for kb in selected if kb.get("name") in selected_kbs]
+    results: list[dict[str, Any]] = []
+    for kb in selected:
+        memories = query_memories(
+            source_dir=kb["source_dir"],
+            query=query,
+            memory_type=args.type,
+            active_only=not args.all,
+            top_k=args.top_k,
+        )
+        for memory in memories:
+            item = memory.to_dict()
+            item["kb"] = kb["name"]
+            results.append(item)
+    results.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+    results = results[:args.top_k]
+    print(json.dumps({"ok": True, "count": len(results), "memories": results}, indent=2, ensure_ascii=False))
+
+
+# Retrieve generic information from selected KB backends using one hierarchical command.
+def cmd_retrieve_ask(args: argparse.Namespace) -> None:
+    from mcp.kb_router import KBRouter
+    router = KBRouter()
+    selected = args.kb or [kb["name"] for kb in _registry_kbs(load_registry(global_env()))]
+    responses = []
+    for kb in selected:
+        responses.append({"kb": kb, "response": json.loads(router.ask(kb=kb, question=args.query, strategy=args.strategy, response_format=args.format))})
+    print(json.dumps({"ok": True, "count": len(responses), "results": responses}, indent=2, ensure_ascii=False))
+
+
+# Import a URL through the same hierarchical retrieval namespace as other retrieval tools.
+def cmd_retrieve_url(args: argparse.Namespace) -> None:
+    args.kb = args.kb or find_kb(load_registry(global_env()), args.kb)
+    cmd_import_url(args)
 
 
 def cmd_memory_dream(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
-    kb = find_kb(registry, args.kb)
-    if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
-    report = run_dreaming_cycle(source_dir=kb["source_dir"], dry_run=args.dry_run)
-    print(json.dumps({"ok": True, "report": report}, indent=2, ensure_ascii=False))
+    selected = _registry_kbs(registry)
+    if not args.all:
+        kb = find_kb(registry, args.kb)
+        if not kb:
+            sys.exit(f"KB '{args.kb}' not found.")
+        selected = [kb]
+    reports = []
+    for kb in selected:
+        report = run_dreaming_cycle(source_dir=kb["source_dir"], dry_run=args.dry_run)
+        reports.append({"kb": kb["name"], "report": report})
+    print(json.dumps({"ok": True, "reports": reports}, indent=2, ensure_ascii=False))
 
 
 def cmd_memory_list(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.kb)
     if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
+        sys.exit(f"KB '{args.kb}' not found.")
     memories = load_kb_memories(kb["source_dir"])
     if args.type:
         memories = [m for m in memories if m.type == args.type]
@@ -807,7 +855,7 @@ def cmd_memory_deprecate(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.kb)
     if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
+        sys.exit(f"KB '{args.kb}' not found.")
     mem = deprecate_memory_by_id(
         source_dir=kb["source_dir"],
         memory_id=args.memory_id,
@@ -815,7 +863,7 @@ def cmd_memory_deprecate(args: argparse.Namespace) -> None:
         superseded_by=args.superseded_by,
     )
     if not mem:
-        sys.exit(f"Memoria '{args.memory_id}' non trovata.")
+        sys.exit(f"Memoria '{args.memory_id}' not found.")
     print(json.dumps({"ok": True, "memory": mem.to_dict()}, indent=2, ensure_ascii=False))
 
 
@@ -823,7 +871,7 @@ def cmd_import_archive(args: argparse.Namespace) -> None:
     registry = load_registry(global_env())
     kb = find_kb(registry, args.kb)
     if not kb:
-        sys.exit(f"KB '{args.kb}' non trovata.")
+        sys.exit(f"KB '{args.kb}' not found.")
     res = import_archive_to_kb(
         archive_path=args.archive,
         output_source_dir=kb["source_dir"],
@@ -983,8 +1031,8 @@ def cmd_config_set(args: argparse.Namespace) -> None:
         asr_val = args.asr.strip().lower()
         if not asr_val.startswith("whisper"):
             sys.exit(
-                f"Errore: al momento è supportato solo Whisper per la trascrizione "
-                f"(es. whisper_turbo_native, whisper_turbo, whisper_s2t). Ricevuto: {args.asr}"
+                f"Error: only Whisper is currently supported for transcription (al momento è supportato solo Whisper) "
+                f"(e.g. whisper_turbo_native, whisper_turbo, whisper_s2t). Received: {args.asr}"
             )
         updates["DOCLING_ASR_ENGINE"] = asr_val
 
@@ -997,11 +1045,11 @@ def cmd_config_set(args: argparse.Namespace) -> None:
         updates["CHUNK_OVERLAP_SIZE"] = str(args.chunk_overlap)
 
     if not updates:
-        print("Nessun parametro specificato. Usa `ragcli config set --help`.")
+        print("No parameters specified. Use `ragcli config set --help`.")
         return
 
     upsert_global_env(updates)
-    print("Configurazione aggiornata con successo:")
+    print("Configuration updated successfully (Configurazione aggiornata con successo):")
     for k, v in updates.items():
         print(f"  {k} = {v}")
 
@@ -1010,9 +1058,9 @@ def cmd_config_set(args: argparse.Namespace) -> None:
         registry = load_registry(env)
         kb = find_kb(registry, args.kb)
         if not kb:
-            sys.exit(f"KB '{args.kb}' non trovata.")
+            sys.exit(f"KB '{args.kb}' not found.")
         write_kb_env(kb, env)
-        print(f"Ambiente locale per KB '{args.kb}' sincronizzato.")
+        print(f"Local environment for KB '{args.kb}' synchronized.")
 
 
 # Query and display available Ollama models.
@@ -1027,13 +1075,13 @@ def cmd_config_models(_args: argparse.Namespace) -> None:
         data = res.json()
         models = data.get("models", [])
     except Exception as exc:
-        sys.exit(f"Impossibile contattare Ollama su {host}: {exc}")
+        sys.exit(f"Unable to contact Ollama at {host}: {exc}")
 
     current_llm = env.get("LLM_MODEL", "")
     current_emb = env.get("EMBEDDING_MODEL", "")
 
-    print(f"\nModelli disponibili su Ollama ({host}):")
-    print(f"{'NOME':<42} {'DIMENSIONE':<12} {'RUOLO ATTIVO':<20}")
+    print(f"\nAvailable Ollama models ({host}):")
+    print(f"{'NAME':<42} {'SIZE':<12} {'ACTIVE ROLE':<20}")
     print("-" * 76)
     for m in models:
         name = m.get("name", "")
@@ -1046,28 +1094,28 @@ def cmd_config_models(_args: argparse.Namespace) -> None:
             role = "[EMBEDDING ATTIVO]"
         print(f"{name:<42} {size_gb:<12} {role:<20}")
 
-    print("\nModello di trascrizione audio (ASR):")
-    print(f"  Engine corrente: {env.get('DOCLING_ASR_ENGINE', 'whisper_turbo_native')} (solo Whisper supportato)")
+    print("\nAudio transcription model (ASR):")
+    print(f"  Current engine: {env.get('DOCLING_ASR_ENGINE', 'whisper_turbo_native')} (Whisper only)")
 
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ragcli",
-        description="CLI minima per gestire KB LightRAG WebUI-first con runtime condiviso.",
+        description="Minimal CLI for managing WebUI-first LightRAG KBs with a shared runtime.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sync = sub.add_parser("sync", help="gestione sync remota")
+    sync = sub.add_parser("sync", help="remote sync management")
     sync_sub = sync.add_subparsers(dest="sync_cmd", required=True)
-    prepare = sync_sub.add_parser("prepare", help="prepara un job di sincronizzazione")
+    prepare = sync_sub.add_parser("prepare", help="prepare a sync job")
     prepare.add_argument("--kb", required=True)
     prepare.add_argument("--source", required=True)
     prepare.add_argument("--mode", choices=("full", "partial"), required=True)
     prepare.add_argument("--json", action="store_true")
     prepare.set_defaults(func=cmd_sync_prepare)
 
-    job = sub.add_parser("job", help="stato dei job")
+    job = sub.add_parser("job", help="job status")
     job_sub = job.add_subparsers(dest="job_cmd", required=True)
     for name in ("status", "wait"):
         status = job_sub.add_parser(name)
@@ -1076,36 +1124,36 @@ def build_parser() -> argparse.ArgumentParser:
         status.add_argument("--json", action="store_true")
         status.set_defaults(func=cmd_job_status)
 
-    doctor = sub.add_parser("doctor", help="verifica runtime, config, servizi e publish")
+    doctor = sub.add_parser("doctor", help="verify runtime, config, services, and publishing")
     doctor.set_defaults(func=cmd_doctor)
 
-    add = sub.add_parser("add", help="crea una KB puntando a una cartella sorgente")
+    add = sub.add_parser("add", help="create a KB from a source directory")
     add.add_argument("name")
     add.add_argument("source_dir")
     add.add_argument("--port", type=int, help="porta del server LightRAG")
     add.set_defaults(func=cmd_add)
 
-    list_cmd = sub.add_parser("list", help="elenca le KB registrate")
+    list_cmd = sub.add_parser("list", help="list registered KBs")
     list_cmd.set_defaults(func=cmd_list)
 
-    ingest = sub.add_parser("ingest", help="sync incrementale della sorgente verso la KB gia avviata")
+    ingest = sub.add_parser("ingest", help="incrementally sync the source to an existing KB")
     ingest.add_argument("name")
-    ingest.add_argument("--force", action="store_true", help="rigenera derivati e riallinea forzatamente la KB")
-    ingest.add_argument("--pipelines", help="categorie di pipeline abilitate separate da virgola (text,pdf,images,office,audio)")
-    ingest.add_argument("--no-text", action="store_true", help="disabilita la pipeline per file di testo/codice")
-    ingest.add_argument("--no-pdf", action="store_true", help="disabilita la pipeline per documenti PDF")
-    ingest.add_argument("--no-images", action="store_true", help="disabilita la pipeline per immagini")
-    ingest.add_argument("--no-office", action="store_true", help="disabilita la pipeline per file Office/ODF/EPUB")
-    ingest.add_argument("--no-audio", action="store_true", help="disabilita la pipeline per audio e video")
+    ingest.add_argument("--force", action="store_true", help="regenerate derived artifacts and forcibly realign the KB")
+    ingest.add_argument("--pipelines", help="comma-separated enabled pipeline categories (text,pdf,images,office,audio)")
+    ingest.add_argument("--no-text", action="store_true", help="disable the pipeline for text/code files")
+    ingest.add_argument("--no-pdf", action="store_true", help="disable the pipeline for PDF documents")
+    ingest.add_argument("--no-images", action="store_true", help="disable the image pipeline")
+    ingest.add_argument("--no-office", action="store_true", help="disable the Office/ODF/EPUB pipeline")
+    ingest.add_argument("--no-audio", action="store_true", help="disable the audio/video pipeline")
     ingest.set_defaults(func=cmd_ingest)
 
     exclude_help = (
         "Pattern glob stile fnmatch.\n"
-        "- usa / finale per indicare una cartella: 'agent/' prende la cartella top-level 'agent'; 'notes/agent/' prende quel path specifico\n"
-        "- usa * per i file: '*.txt' prende tutti i file txt; 'agent*' prende agent.md, agentico.md, ecc.\n"
-        "- usa '.*/' per dire 'tutte le cartelle top-level che iniziano con .' nella KB; l'espansione avviene live con 'ls --expanded' e durante ingest\n"
-        "- puoi passare piu pattern nella stessa istruzione, separati da spazi oppure con virgole o ';'\n"
-        "- quota sempre i pattern per evitare l'espansione della shell\n"
+        "- use a trailing / to indicate a folder: 'agent/' takes the folder top-level 'agent'; 'notes/agent/' prende quel path specifico\n"
+        "- use * for files: '*.txt' takes all files txt; 'agent*' takes agent.md, agentico.md, ecc.\n"
+        "- use '.*/' for all top-level folders beginning with . in the KB; expansion happens live with 'ls --expanded' and during ingest\n"
+        "- you can pass multiple patterns in one instruction, separated by spaces, commas, or ';'\n"
+        "- always quote patterns to prevent shell expansion\n"
         "Esempi:\n"
         "  ragcli exclude add second-brain '*.txt' 'agent*' 'agent/'\n"
         "  ragcli exclude add second-brain '.*/'\n"
@@ -1114,14 +1162,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     exclude = sub.add_parser(
         "exclude",
-        help="gestione pattern di esclusione",
+        help="exclusion pattern management",
         description=exclude_help,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     exclude_sub = exclude.add_subparsers(dest="exclude_cmd", required=True)
     ex_add = exclude_sub.add_parser(
         "add",
-        help="aggiunge uno o piu pattern di esclusione",
+        help="add one or more exclusion patterns",
         description=exclude_help,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1130,7 +1178,7 @@ def build_parser() -> argparse.ArgumentParser:
     ex_add.set_defaults(func=cmd_exclude_add)
     ex_rm = exclude_sub.add_parser(
         "rm",
-        help="rimuove uno o piu pattern di esclusione",
+        help="remove one or more exclusion patterns",
         description=exclude_help,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1139,45 +1187,45 @@ def build_parser() -> argparse.ArgumentParser:
     ex_rm.set_defaults(func=cmd_exclude_rm)
     ex_ls = exclude_sub.add_parser(
         "ls",
-        help="elenca i pattern di esclusione della KB",
+        help="list KB exclusion patterns",
         description=exclude_help,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ex_ls.add_argument("name")
-    ex_ls.add_argument("--expanded", action="store_true", help="mostra l'espansione live delle cartelle escluse")
+    ex_ls.add_argument("--expanded", action="store_true", help="show the live expansion of excluded folders")
     ex_ls.set_defaults(func=cmd_exclude_ls)
 
-    start = sub.add_parser("start", help="avvia il server di una KB")
+    start = sub.add_parser("start", help="start a KB server")
     start.add_argument("name")
     start.set_defaults(func=cmd_start)
 
-    stop = sub.add_parser("stop", help="ferma il server di una KB")
+    stop = sub.add_parser("stop", help="stop a KB server")
     stop.add_argument("name")
     stop.set_defaults(func=cmd_stop)
 
-    remove = sub.add_parser("remove", help="elimina tutta la KB preservando solo i file sorgente")
+    remove = sub.add_parser("remove", help="delete the entire KB while preserving source files")
     remove.add_argument("name")
     remove.set_defaults(func=cmd_remove)
 
-    mcp = sub.add_parser("mcp", help="registra o rimuove l'MCP nei client supportati")
+    mcp = sub.add_parser("mcp", help="register or remove MCP in supported clients")
     mcp_sub = mcp.add_subparsers(dest="mcp_cmd", required=True)
-    mcp_add = mcp_sub.add_parser("add", help="registra l'MCP della KB")
+    mcp_add = mcp_sub.add_parser("add", help="register the KB MCP")
     mcp_add.add_argument("name")
     mcp_add.add_argument("--client", choices=list(mcp_clients.CLIENTS) + ["all"], default="claude-code")
     mcp_add.add_argument("--print-only", action="store_true")
     mcp_add.set_defaults(func=cmd_mcp_add)
-    mcp_rm = mcp_sub.add_parser("rm", help="rimuove l'MCP della KB")
+    mcp_rm = mcp_sub.add_parser("rm", help="remove the KB MCP")
     mcp_rm.add_argument("name")
     mcp_rm.add_argument("--client", choices=list(mcp_clients.REMOVERS) + ["all"], default="claude-code")
     mcp_rm.set_defaults(func=cmd_mcp_rm)
 
-    move = sub.add_parser("move", help="sposta la data_dir tra source path e repo locale")
+    move = sub.add_parser("move", help="move data_dir between source path and local repo")
     move.add_argument("name")
     move.set_defaults(func=cmd_move)
 
-    service = sub.add_parser("service", help="gestione servizi Linux systemd --user")
+    service = sub.add_parser("service", help="manage Linux systemd --user services")
     service_sub = service.add_subparsers(dest="service_cmd", required=True)
-    service_status = service_sub.add_parser("status", help="mostra stato servizi")
+    service_status = service_sub.add_parser("status", help="show service status")
     service_status.add_argument("name", nargs="?")
     service_status.set_defaults(func=cmd_service_status)
     service_restart = service_sub.add_parser("restart", help="riavvia un servizio")
@@ -1190,54 +1238,79 @@ def build_parser() -> argparse.ArgumentParser:
     service_install.set_defaults(func=cmd_service_install_units)
 
     # memory subcommand
-    mem_parser = sub.add_parser("memory", help="gestione memoria per coding agents")
+    mem_parser = sub.add_parser("memory", help="manage memory for coding agents")
     mem_sub = mem_parser.add_subparsers(dest="memory_cmd", required=True)
 
-    rem_p = mem_sub.add_parser("remember", help="salva una nuova memoria")
-    rem_p.add_argument("kb", help="nome della KB")
-    rem_p.add_argument("content", help="testo della memoria")
+    rem_p = mem_sub.add_parser("remember", help="save a new memory")
+    rem_p.add_argument("kb", help="KB name")
+    rem_p.add_argument("content", help="memory text")
     rem_p.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default="fact")
     rem_p.add_argument("--title", default="")
-    rem_p.add_argument("--tags", default="", help="tag separati da virgola")
+    rem_p.add_argument("--tags", default="", help="comma-separated tags")
     rem_p.add_argument("--supersedes", default=None, help="ID memoria superata da questa")
     rem_p.set_defaults(func=cmd_memory_remember)
 
-    rec_p = mem_sub.add_parser("recall", help="cerca tra le memorie attive")
-    rec_p.add_argument("kb", help="nome della KB")
-    rec_p.add_argument("query", help="termini di ricerca")
+    rec_p = mem_sub.add_parser("recall", help="search active memories")
+    rec_p.add_argument("kb_legacy", nargs="?", help=argparse.SUPPRESS)
+    rec_p.add_argument("query", nargs="+", help="termini di ricerca")
+    rec_p.add_argument("--kb", action="append", default=None, help="limita la ricerca a una o più KB (default: tutte)")
     rec_p.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default=None)
-    rec_p.add_argument("--all", action="store_true", help="includi memorie superseded/deprecated")
+    rec_p.add_argument("--all", action="store_true", help="include superseded/deprecated memories")
     rec_p.add_argument("--top-k", type=int, default=5)
     rec_p.set_defaults(func=cmd_memory_recall)
 
-    drm_p = mem_sub.add_parser("dream", help="lancia il ciclo di consolidamento e dedup (Dreaming)")
-    drm_p.add_argument("kb", help="nome della KB")
+    drm_p = mem_sub.add_parser("dream", help="run the consolidation and deduplication cycle (Dreaming)")
+    drm_p.add_argument("kb", nargs="?", help="KB name (default: tutte se si usa --all)")
+    drm_p.add_argument("--all", action="store_true", help="esegue il ciclo su tutte le KB")
     drm_p.add_argument("--dry-run", action="store_true")
     drm_p.set_defaults(func=cmd_memory_dream)
 
-    lst_p = mem_sub.add_parser("list", help="elenca memorie della KB")
-    lst_p.add_argument("kb", help="nome della KB")
+    lst_p = mem_sub.add_parser("list", help="list KB memories")
+    lst_p.add_argument("kb", help="KB name")
     lst_p.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default=None)
     lst_p.add_argument("--status", choices=("active", "superseded", "deprecated"), default=None)
     lst_p.set_defaults(func=cmd_memory_list)
 
-    dep_p = mem_sub.add_parser("deprecate", help="invalida o marca superata una memoria")
-    dep_p.add_argument("kb", help="nome della KB")
+    dep_p = mem_sub.add_parser("deprecate", help="invalidate or supersede a memory")
+    dep_p.add_argument("kb", help="KB name")
     dep_p.add_argument("memory_id", help="ID della memoria")
-    dep_p.add_argument("--reason", default="", help="motivo della deprecazione")
-    dep_p.add_argument("--superseded-by", default=None, help="ID della nuova memoria che la sostituisce")
+    dep_p.add_argument("--reason", default="", help="deprecation reason")
+    dep_p.add_argument("--superseded-by", default=None, help="ID of the new memory that replaces it")
     dep_p.set_defaults(func=cmd_memory_deprecate)
 
+    retrieve = sub.add_parser("retrieve", help="retrieval gerarchico su tutte le KB o su KB selezionate")
+    retrieve_sub = retrieve.add_subparsers(dest="retrieve_cmd", required=True)
+    retrieve_ask = retrieve_sub.add_parser("ask", help="interroga una o tutte le KB")
+    retrieve_ask.add_argument("query")
+    retrieve_ask.add_argument("--kb", action="append", default=None)
+    retrieve_ask.add_argument("--strategy", default="balanced")
+    retrieve_ask.add_argument("--format", default=None)
+    retrieve_ask.set_defaults(func=cmd_retrieve_ask)
+    retrieve_memory = retrieve_sub.add_parser("memory", help="search memories across all KBs or with --kb")
+    retrieve_memory.add_argument("query")
+    retrieve_memory.add_argument("--kb", action="append", default=None)
+    retrieve_memory.add_argument("--type", choices=("preference", "decision", "episodic", "fact"), default=None)
+    retrieve_memory.add_argument("--all", action="store_true")
+    retrieve_memory.add_argument("--top-k", type=int, default=5)
+    retrieve_memory.set_defaults(func=cmd_memory_recall)
+    retrieve_url = retrieve_sub.add_parser("url", help="import media URL into a KB")
+    retrieve_url.add_argument("kb")
+    retrieve_url.add_argument("url")
+    retrieve_url.add_argument("--title", default=None)
+    retrieve_url.add_argument("--subfolder", default="media")
+    retrieve_url.add_argument("--no-index", action="store_true")
+    retrieve_url.set_defaults(func=cmd_import_url)
+
     # import-archive command
-    imp_p = sub.add_parser("import-archive", help="importa e normalizza archivi chat/dati (ZIP/JSON)")
-    imp_p.add_argument("kb", help="nome della KB")
-    imp_p.add_argument("archive", help="percorso file zip o cartella esportata")
+    imp_p = sub.add_parser("import-archive", help="import and normalize chat/data archives (ZIP/JSON)")
+    imp_p.add_argument("kb", help="KB name")
+    imp_p.add_argument("archive", help="ZIP file or exported folder path")
     imp_p.add_argument("--format", choices=("auto", "chatgpt", "claude", "gemini", "generic"), default="auto")
     imp_p.set_defaults(func=cmd_import_archive)
 
     # import-url command (yt-dlp + whisper)
-    url_p = sub.add_parser("import-url", help="scarica media da YouTube, Soundcloud, Instagram, TikTok con yt-dlp, trascrive con Whisper e indicizza nella KB")
-    url_p.add_argument("kb", help="nome della KB")
+    url_p = sub.add_parser("import-url", help="download media from YouTube, Soundcloud, Instagram, and TikTok with yt-dlp, transcribe with Whisper, and index it in the KB")
+    url_p.add_argument("kb", help="KB name")
     url_p.add_argument("url", help="URL media (YouTube, Soundcloud, Instagram, TikTok, ecc.)")
     url_p.add_argument("--title", default=None, help="titolo personalizzato")
     url_p.add_argument("--subfolder", default="media", help="sottocartella in source_dir (default: media)")
@@ -1246,45 +1319,45 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     # hook command
-    hook_parser = sub.add_parser("hook", help="hook per coding agents (pre-prompt e post-session)")
+    hook_parser = sub.add_parser("hook", help="hooks for coding agents (pre-prompt and post-session)")
     hook_sub = hook_parser.add_subparsers(dest="hook_cmd", required=True)
 
-    hinj_p = hook_sub.add_parser("inject", help="genera blocco di contesto pre-prompt da memorie attive")
+    hinj_p = hook_sub.add_parser("inject", help="generate a pre-prompt context block from active memories")
     hinj_p.add_argument("--kb", default="agent-memory", help="nome KB")
     hinj_p.add_argument("--prompt", default="", help="prompt utente")
     hinj_p.set_defaults(func=cmd_hook_inject)
 
-    hcap_p = hook_sub.add_parser("capture", help="cattura log/decisioni post-sessione")
+    hcap_p = hook_sub.add_parser("capture", help="capture post-session logs/decisions")
     hcap_p.add_argument("--kb", default="agent-memory", help="nome KB")
     hcap_p.add_argument("--transcript", default=None)
     hcap_p.add_argument("--text", default=None)
     hcap_p.add_argument("--session-id", default=None)
     hcap_p.set_defaults(func=cmd_hook_capture)
 
-    hinst_p = hook_sub.add_parser("install", help="installa configurazione hook nel client specificato")
+    hinst_p = hook_sub.add_parser("install", help="install hook configuration in the specified client")
     hinst_p.add_argument("--client", choices=("claude-code", "cursor", "codex", "antigravity"), default="claude-code")
     hinst_p.add_argument("--kb", default="agent-memory")
     hinst_p.add_argument("--project-dir", default=None)
     hinst_p.set_defaults(func=cmd_hook_install)
 
-    cfg_parser = sub.add_parser("config", help="pannello di configurazione centralizzato (fasi pipeline, modelli e runtime)")
+    cfg_parser = sub.add_parser("config", help="centralized configuration panel (pipeline phases, models, and runtime)")
     cfg_sub = cfg_parser.add_subparsers(dest="config_cmd")
     cfg_parser.set_defaults(func=cmd_config_show)
 
-    cfg_show = cfg_sub.add_parser("show", help="mostra la configurazione globale organizzata per fasi di pipeline")
+    cfg_show = cfg_sub.add_parser("show", help="show global configuration organized by pipeline phases")
     cfg_show.set_defaults(func=cmd_config_show)
 
-    cfg_set = cfg_sub.add_parser("set", help="modifica i parametri e attiva/disattiva elementi di pipeline")
-    cfg_set.add_argument("--enable-text", action="store_true", help="attiva pipeline testo/codice")
-    cfg_set.add_argument("--disable-text", action="store_true", help="disattiva pipeline testo/codice")
-    cfg_set.add_argument("--enable-pdf", action="store_true", help="attiva pipeline PDF")
-    cfg_set.add_argument("--disable-pdf", action="store_true", help="disattiva pipeline PDF")
-    cfg_set.add_argument("--enable-images", action="store_true", help="attiva pipeline immagini")
-    cfg_set.add_argument("--disable-images", action="store_true", help="disattiva pipeline immagini")
-    cfg_set.add_argument("--enable-office", action="store_true", help="attiva pipeline office/ODF")
-    cfg_set.add_argument("--disable-office", action="store_true", help="disattiva pipeline office/ODF")
-    cfg_set.add_argument("--enable-audio", action="store_true", help="attiva pipeline audio/video")
-    cfg_set.add_argument("--disable-audio", action="store_true", help="disattiva pipeline audio/video")
+    cfg_set = cfg_sub.add_parser("set", help="modify parameters and enable/disable pipeline elements")
+    cfg_set.add_argument("--enable-text", action="store_true", help="enable pipeline testo/codice")
+    cfg_set.add_argument("--disable-text", action="store_true", help="disenable pipeline testo/codice")
+    cfg_set.add_argument("--enable-pdf", action="store_true", help="enable pipeline PDF")
+    cfg_set.add_argument("--disable-pdf", action="store_true", help="disenable pipeline PDF")
+    cfg_set.add_argument("--enable-images", action="store_true", help="enable pipeline immagini")
+    cfg_set.add_argument("--disable-images", action="store_true", help="disenable pipeline immagini")
+    cfg_set.add_argument("--enable-office", action="store_true", help="enable pipeline office/ODF")
+    cfg_set.add_argument("--disable-office", action="store_true", help="disenable pipeline office/ODF")
+    cfg_set.add_argument("--enable-audio", action="store_true", help="enable pipeline audio/video")
+    cfg_set.add_argument("--disable-audio", action="store_true", help="disenable pipeline audio/video")
     cfg_set.add_argument("--enable-tables", action="store_true", help="attiva estrazione tabelle Docling")
     cfg_set.add_argument("--disable-tables", action="store_true", help="disattiva estrazione tabelle Docling")
     cfg_set.add_argument("--enable-code", action="store_true", help="attiva arricchimento codice Docling")
@@ -1293,12 +1366,12 @@ def build_parser() -> argparse.ArgumentParser:
     cfg_set.add_argument("--disable-formula", action="store_true", help="disattiva arricchimento formule Docling")
     cfg_set.add_argument("--llm", help="modello LLM (es. qwen3.5:4b)")
     cfg_set.add_argument("--embedding", help="modello embedding (es. embeddinggemma-2:latest)")
-    cfg_set.add_argument("--dim", type=int, help="dimensione embedding (es. 768 per embeddinggemma-2)")
+    cfg_set.add_argument("--dim", type=int, help="embedding dimension (e.g. 768 for embeddinggemma-2)")
     cfg_set.add_argument("--asr", help="modello trascrizione (solo Whisper: whisper_turbo_native, whisper_turbo, whisper_s2t)")
     cfg_set.add_argument("--ollama-host", help="URL host Ollama (es. http://localhost:11434)")
     cfg_set.add_argument("--chunk-size", type=int, help="dimensione chunk in token")
     cfg_set.add_argument("--chunk-overlap", type=int, help="sovrapposizione chunk in token")
-    cfg_set.add_argument("--kb", help="nome KB opzionale per sincronizzare il relativo .env")
+    cfg_set.add_argument("--kb", help="optional KB name to synchronize its .env")
     cfg_set.set_defaults(func=cmd_config_set)
 
     cfg_models = cfg_sub.add_parser("models", help="elenca i modelli disponibili su Ollama e lo stato attivo")

@@ -521,7 +521,7 @@ def test_ingestion_worker_source_lock(memory_catalog: Catalog, mock_session, tmp
     cat.create_job("job_2", kb_id="kb1", source_id="src_locked", stage="PREPARING")
     manifest = create_staged_job_manifest(job_id="job_2", kb_id="kb1", source_id="src_locked")
 
-    with pytest.raises(JobLockedError, match="è attualmente attivo"):
+    with pytest.raises(JobLockedError, match="is currently active|è attualmente attivo"):
         worker.process_job("job_2", manifest)
 
 

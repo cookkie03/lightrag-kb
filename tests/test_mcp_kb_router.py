@@ -274,7 +274,7 @@ def test_missing_or_unknown_kb_returns_structured_error(mock_kb_environment):
         out = json.loads(tool_call())
         assert out["error"] == "KB_NOT_FOUND"
         assert out["kb"] == bad_kb
-        assert "non trovata" in out["message"].lower()
+        assert "not found" in out["message"].lower() or "non trovata" in out["message"].lower()
 
 
 # -----------------------------------------------------------------------------
@@ -304,7 +304,7 @@ def test_backend_connection_exception_handled_cleanly(mock_kb_environment):
         with patch.object(router.session, "post", side_effect=requests.exceptions.ConnectionError("Connection refused")):
             res = json.loads(router.ask(kb="kb-alpha", question="query"))
             assert res["error"] == "BACKEND_OFFLINE"
-            assert "Connessione fallita" in res["message"]
+            assert "Connection failed" in res["message"] or "Connessione fallita" in res["message"]
 
 
 # -----------------------------------------------------------------------------
@@ -745,7 +745,7 @@ def test_discover_duplicates_unsupported_kind_returns_feature_not_enabled(mock_k
         res = json.loads(router.discover_duplicates(kb="kb-alpha", kind=mode))
         assert res["error"] == "FEATURE_NOT_ENABLED"
         assert f"discover_duplicates:{mode}" in res["feature"]
-        assert "non è attualmente abilitata" in res["message"]
+        assert "not currently enabled" in res["message"] or "non è attualmente abilitata" in res["message"]
 
 
 # -----------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 Implements §4 and §5 of the monolithic plan:
 - Processes staged jobs from Mac / NAS clients:
-  - Validates manifests and checks KB-level single-writer lock (§5: 'un solo writer per KB').
+  - Validates manifests and checks KB-level single-writer lock (§5: 'single writer per KB').
   - Validates safe sandboxed paths to prevent directory traversal and sandbox escaping (§11 #10).
   - Automatically recovers any pending checkpoints left from previous crashes (§5).
   - Strict safety guards on deletions:
@@ -134,7 +134,7 @@ class IngestionWorker:
         self.kb_lock = indexer.writer_lock
 
     def acquire_kb_lock(self, kb_id: str, current_job_id: str) -> None:
-        """Ensure only one sync job is actively mutating a KB (§5: 'un solo writer per KB').
+        """Ensure only one sync job is actively mutating a KB (§5: 'single writer per KB').
 
         Checks if any other job for this Knowledge Base is currently in an active stage.
         """
@@ -143,8 +143,8 @@ class IngestionWorker:
         for j in jobs:
             if j["job_id"] != current_job_id and j["stage"] in active_stages:
                 raise JobLockedError(
-                    f"Job '{j['job_id']}' è attualmente attivo ({j['stage']}) per la KB '{kb_id}'. "
-                    f"È consentito un solo writer per KB."
+                    f"Job '{j['job_id']}' is currently active ({j['stage']}) for KB '{kb_id}'. "
+                    f"Only one writer per KB is allowed."
                 )
 
     def acquire_source_lock(self, source_id: str, current_job_id: str) -> None:
@@ -154,7 +154,7 @@ class IngestionWorker:
         for j in jobs:
             if j["job_id"] != current_job_id and j["stage"] in active_stages:
                 raise JobLockedError(
-                    f"Job '{j['job_id']}' è attualmente attivo ({j['stage']}) per la sorgente '{source_id}'."
+                    f"Job '{j['job_id']}' is currently active ({j['stage']}) for source '{source_id}'."
                 )
 
     def validate_safety_guards(
@@ -177,17 +177,17 @@ class IngestionWorker:
 
         source = self.catalog.get_source(manifest["source_id"])
         if source is None:
-            return False, f"Sorgente sconosciuta: {manifest['source_id']}."
+            return False, f"Unknown source: {manifest['source_id']}."
         if source["deletion_policy"] != "guarded":
-            return False, f"Policy di cancellazione disabilitata ('{source['deletion_policy']}') per sorgente {manifest['source_id']}."
+            return False, f"Deletion policy disabled ('{source['deletion_policy']}') for source {manifest['source_id']}."
 
         # Guard 1: Push / partial scan cannot delete
         if manifest["mode"] != "full_folder":
-            return False, "La modalità push (selected_files) non autorizza delezioni."
+            return False, "push mode (selected_files) does not authorize deletions."
         if not manifest["scan_complete"]:
-            return False, "Scansione incompleta: delezioni automatiche bloccate per sicurezza."
+            return False, "Incomplete scan: automatic deletions blocked for safety."
         if manifest["scan_errors"] > 0:
-            return False, f"La scansione ha registrato {manifest['scan_errors']} errori: delezioni bloccate."
+            return False, f"Scan recorded {manifest['scan_errors']} errors: deletions blocked."
 
         # Guard 2: High deletion threshold (>20% or >100 files)
         active_files = self.catalog.list_files(source_id=manifest["source_id"], active_only=True)
@@ -198,8 +198,8 @@ class IngestionWorker:
             pct = (del_count / total_active) * 100
             if del_count > 100 or (del_count / total_active) > 0.20:
                 return False, (
-                    f"Superata soglia di sicurezza delezioni: {del_count}/{total_active} file "
-                    f"({pct:.1f}% > 20% o >100). Impostato stato NEEDS_REVIEW."
+                    f"Deletion safety threshold exceeded: {del_count}/{total_active} files "
+                    f"({pct:.1f}% > 20% or >100). Set to NEEDS_REVIEW."
                 )
 
         # Guard 3: Suspicious empty root / offline host
@@ -207,8 +207,8 @@ class IngestionWorker:
         non_delete_count = sum(1 for a in manifest["actions"] if a["action"] in ("add", "modify", "rename"))
         if total_active > 0 and non_delete_count == 0 and del_count == total_active:
             return False, (
-                "Cartella vuota in modo sospetto o host sorgente offline: "
-                "blocco preventivo di tutte le cancellazioni (NEEDS_REVIEW)."
+                "Suspicious empty folder or source host offline: "
+                "preventively blocked all deletions (NEEDS_REVIEW)."
             )
 
         return True, None
@@ -221,24 +221,24 @@ class IngestionWorker:
         """Execute a staged job from start to finish (§4, §5)."""
         job = self.catalog.get_job(job_id)
         if job is None:
-            raise IngestionWorkerError(f"Job non trovato nel catalogo: {job_id}")
+            raise IngestionWorkerError(f"Job not found in catalog: {job_id}")
 
         # A job ID is a single staging directory name, never a relative path.
         if not job_id or job_id in {".", ".."} or Path(job_id).name != job_id or "\\" in job_id:
             return self.catalog.update_job(job_id, stage="NEEDS_REVIEW", error_summary="Invalid job identifier")
 
         if job["stage"] == "COMPLETED":
-            logger.info("Job '%s' già completato (idempotente).", job_id)
+            logger.info("Job '%s' already completed (idempotent).", job_id)
             return job
 
         # Read staged requests before locking; admit them under the writer lock.
         raw_manifest = None
         if manifest is None:
             if not self.staging_dir:
-                raise IngestionWorkerError(f"Nessuna directory di staging configurata per il job {job_id}")
+                raise IngestionWorkerError(f"No staging directory configured for job {job_id}")
             manifest_file = self.staging_dir / job_id / "manifest.json"
             if not manifest_file.exists():
-                raise IngestionWorkerError(f"File di manifest mancante in staging: {manifest_file}")
+                raise IngestionWorkerError(f"Missing manifest file in staging: {manifest_file}")
             try:
                 validate_safe_relative_path(f"{job_id}/manifest.json", base_dir=self.staging_dir, allow_symlinks=False)
                 raw_manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -251,7 +251,7 @@ class IngestionWorker:
         source_id = job["source_id"]
         kb_id = job["kb_id"]
 
-        # Acquire KB-level single-writer lock (§5: 'un solo writer per KB')
+        # Acquire KB-level single-writer lock (§5: 'single writer per KB')
         with self.kb_lock:
             # Another worker may have completed this job while we waited.
             job = self.catalog.get_job(job_id)
@@ -282,7 +282,7 @@ class IngestionWorker:
                     if act.get("staged_filename"):
                         validate_safe_relative_path(act["staged_filename"])
                 except SafePathError as path_err:
-                    err_msg = f"Violazione di sicurezza percorso nel manifest: {path_err}"
+                    err_msg = f"Path safety violation in manifest: {path_err}"
                     logger.error(err_msg)
                     return self.catalog.update_job(
                         job_id=job_id,
@@ -295,7 +295,7 @@ class IngestionWorker:
             self.catalog.update_job(job_id, stage="VALIDATING")
             is_safe, guard_error = self.validate_safety_guards(manifest)
             if not is_safe:
-                logger.warning("Safety guard attivata per il job '%s': %s", job_id, guard_error)
+                logger.warning("Safety guard triggered for job '%s': %s", job_id, guard_error)
                 updated_job = self.catalog.update_job(
                     job_id=job_id,
                     stage="NEEDS_REVIEW",
@@ -378,7 +378,7 @@ class IngestionWorker:
                         staged_path = Path(rel_path)
 
                     if staged_path is None or not staged_path.is_file():
-                        raise FileNotFoundError(f"File sorgente per '{rel_path}' non trovato in staging incoming")
+                        raise FileNotFoundError(f"Source file for '{rel_path}' not found in staging incoming")
                     if not staging_incoming:
                         raise SafePathError("Staging directory is required")
                     validate_safe_relative_path(staged_path.relative_to(staging_incoming), base_dir=staging_incoming, allow_symlinks=False)

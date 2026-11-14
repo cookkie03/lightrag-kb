@@ -1,0 +1,10 @@
+[Unit]
+Description=Run LightRAG memory dreaming daily at 04:00
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+Unit=lightrag-dreaming.service
+
+[Install]
+WantedBy=timers.target

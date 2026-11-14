@@ -98,7 +98,7 @@ def _normalize_strategy(strategy: str | None) -> str:
     mode = STRATEGY_TO_MODE.get(strategy.strip().lower())
     if mode is None:
         allowed = ", ".join(sorted(set(STRATEGY_TO_MODE.keys())))
-        raise ValueError(f"Strategia non valida: '{strategy}'. Valori ammessi: {allowed}.")
+        raise ValueError(f"Invalid strategy: '{strategy}'. Allowed values: {allowed}.")
     return mode
 
 
@@ -110,7 +110,7 @@ def _normalize_context(context: dict[str, Any] | None) -> dict[str, Any]:
     if unknown:
         allowed = ", ".join(sorted(ALLOWED_CONTEXT_FIELDS))
         raise ValueError(
-            f"Parametri context non riconosciuti: {', '.join(unknown)}. Campi ammessi: {allowed}."
+            f"Unrecognized context parameters: {', '.join(unknown)}. Allowed fields: {allowed}."
         )
     payload = {
         "top_k": context.get("top_k"),
@@ -205,7 +205,7 @@ class KBRouter:
             return None, {
                 "error": "KB_NOT_FOUND",
                 "kb": kb_name,
-                "message": f"KB '{kb_name}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb_name}' not found in registry. No fallback or cross-KB allowed.",
             }
 
         port = int(kb["port"])
@@ -214,7 +214,7 @@ class KBRouter:
                 "error": "BACKEND_OFFLINE",
                 "kb": kb_name,
                 "port": port,
-                "message": f"Il server per la KB '{kb_name}' non è attivo su :{port}. Avvialo con `ragcli start {kb_name}`.",
+                "message": f"The server for KB '{kb_name}' is not running on :{port}. Start it with `ragcli start {kb_name}`.",
             }
 
         url = f"http://127.0.0.1:{port}{path}"
@@ -226,7 +226,7 @@ class KBRouter:
                     "kb": kb_name,
                     "port": port,
                     "status_code": resp.status_code,
-                    "message": resp.text or f"Errore HTTP {resp.status_code} dal server LightRAG.",
+                    "message": resp.text or f"HTTP error {resp.status_code} from LightRAG server.",
                 }
             try:
                 return resp.json(), None
@@ -237,7 +237,7 @@ class KBRouter:
                 "error": "BACKEND_OFFLINE",
                 "kb": kb_name,
                 "port": port,
-                "message": f"Connessione fallita verso il backend della KB '{kb_name}' su :{port} ({exc}).",
+                "message": f"Connection failed to backend for KB '{kb_name}' on :{port} ({exc}).",
             }
         except Exception as exc:
             return None, {
@@ -306,7 +306,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         try:
@@ -371,7 +371,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         try:
@@ -426,7 +426,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         with self.get_catalog(kb) as cat:
@@ -453,7 +453,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         with self.get_catalog(kb) as cat:
@@ -463,7 +463,7 @@ class KBRouter:
                     "error": "JOB_NOT_FOUND",
                     "kb": kb,
                     "job_id": job_id,
-                    "message": f"Job '{job_id}' non trovato nella KB '{kb}'.",
+                    "message": f"Job '{job_id}' not found in KB '{kb}'.",
                 })
 
             result = {
@@ -491,7 +491,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         with self.get_catalog(kb) as cat:
@@ -503,7 +503,7 @@ class KBRouter:
                     "error": "DOCUMENT_NOT_FOUND",
                     "kb": kb,
                     "doc_id": doc_id,
-                    "message": f"Documento '{doc_id}' non trovato nel catalogo della KB '{kb}'.",
+                    "message": f"Document '{doc_id}' not found in catalog for KB '{kb}'.",
                 })
 
             occurrences = cat.resolve_evidence(doc["canonical_doc_id"])
@@ -583,7 +583,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         kind_norm = (kind or "exact").strip().lower()
@@ -609,8 +609,8 @@ class KBRouter:
             "feature": f"discover_duplicates:{kind}",
             "kb": kb,
             "message": (
-                f"Modalità duplicati '{kind}' non è attualmente abilitata nella KB '{kb}'. "
-                "Solo la modalità 'exact' (A1 binary SHA256) è attiva."
+                f"Duplicate mode '{kind}' is not currently enabled for KB '{kb}'. "
+                "Only 'exact' mode (A1 binary SHA256) is active."
             ),
         })
 
@@ -623,7 +623,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro. Nessun fallback o cross-KB consentito.",
+                "message": f"KB '{kb}' not found in registry. No fallback or cross-KB allowed.",
             })
 
         # Advanced feature A6 not yet enabled
@@ -635,8 +635,8 @@ class KBRouter:
             "right_source": right_source,
             "mode": mode,
             "message": (
-                f"Il confronto cartelle avanzato (A6 knowledge novelty, mode='{mode}') "
-                f"non è attualmente abilitato per la KB '{kb}'."
+                f"Advanced folder comparison (A6 knowledge novelty, mode='{mode}') "
+                f"is not currently enabled for KB '{kb}'."
             ),
         })
 
@@ -656,7 +656,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro.",
+                "message": f"KB '{kb}' not found in registry.",
             })
 
         source_dir = kb_info.get("source_dir")
@@ -696,7 +696,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro.",
+                "message": f"KB '{kb}' not found in registry.",
             })
 
         source_dir = kb_info.get("source_dir")
@@ -734,7 +734,7 @@ class KBRouter:
             return _serialize({
                 "error": "KB_NOT_FOUND",
                 "kb": kb,
-                "message": f"KB '{kb}' non trovata nel registro.",
+                "message": f"KB '{kb}' not found in registry.",
             })
 
         source_dir = kb_info.get("source_dir")
@@ -750,7 +750,7 @@ class KBRouter:
                     "error": "MEMORY_NOT_FOUND",
                     "kb": kb,
                     "memory_id": memory_id,
-                    "message": f"Memoria '{memory_id}' non trovata.",
+                    "message": f"Memory '{memory_id}' not found.",
                 })
             return _serialize({
                 "status": "ok",
