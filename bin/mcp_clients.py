@@ -1,9 +1,9 @@
-"""Integrazioni client per `ragcli mcp-add` — registra l'MCP di una KB in tool terzi.
+"""Client integrations for `ragcli mcp-add` — registers KB MCP in third-party tools.
 
-Client supportati: claude-code, claude-desktop, codex, antigravity, cursor.
-Ognuno usa un meccanismo diverso: i due con CLI dedicata (claude-code, codex)
-invocano il comando di sistema; gli altri editano direttamente il loro
-file di config JSON (mcpServers), con backup .bak della versione precedente.
+Supported clients: claude-code, claude-desktop, codex, antigravity, cursor.
+Each uses a different mechanism: the two with dedicated CLIs (claude-code, codex)
+invoke system commands; the others directly edit their
+JSON config file (mcpServers), with a .bak backup of the previous version.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _merge_json_mcp_server(path: Path, mcp_name: str, entry: dict, print_only: b
     if path.exists():
         shutil.copy(path, path.with_suffix(path.suffix + ".bak"))
     path.write_text(json.dumps(config, indent=2) + "\n")
-    print(f"Registrato in {path}")
+    print(f"Registered in {path}")
     return 0
 
 
@@ -54,13 +54,13 @@ def add_claude_code(mcp_name: str, python: Path, script: Path, kb_name: str, pri
     cwd = Path.cwd()
     cmd = ["claude", "mcp", "add", "--scope", "project", mcp_name,
            "--", str(python), str(script), "--kb", kb_name]
-    print(f"Comando di registrazione (progetto locale: {cwd}):\n  " + " ".join(cmd))
+    print(f"Registration command (local project: {cwd}):\n  " + " ".join(cmd))
     if print_only:
         return 0
     rc = subprocess.call(cmd, cwd=cwd)
     if rc == 0:
-        print(f"MCP '{mcp_name}' registrato in {cwd}/.mcp.json (scope project). "
-              f"Verifica con /mcp in Claude Code aprendo quel progetto.")
+        print(f"MCP '{mcp_name}' registered in {cwd}/.mcp.json (scope project). "
+              f"Verify with /mcp in Claude Code by opening that project.")
     return rc
 
 
@@ -69,21 +69,21 @@ def add_claude_desktop(mcp_name: str, python: Path, script: Path, kb_name: str, 
                         source_folder: Path | None = None) -> int:
     rc = _merge_json_mcp_server(CLAUDE_DESKTOP_CONFIG, mcp_name, _server_entry(python, script, kb_name), print_only)
     if rc == 0 and not print_only:
-        print("Riavvia Claude Desktop per applicare le modifiche.")
+        print("Restart Claude Desktop to apply changes.")
     return rc
 
 
 # Register the server globally via Codex CLI.
 def add_codex(mcp_name: str, python: Path, script: Path, kb_name: str, print_only: bool,
               source_folder: Path | None = None) -> int:
-    # codex CLI non supporta mcp_servers per-progetto: config.toml è sempre globale.
+    # codex CLI does not support per-project mcp_servers: config.toml is always global.
     cmd = ["codex", "mcp", "add", mcp_name, "--", str(python), str(script), "--kb", kb_name]
-    print("Codex non supporta MCP locali al progetto, registro globalmente.\nComando di registrazione:\n  " + " ".join(cmd))
+    print("Codex does not support project-local MCPs, registering globally.\nRegistration command:\n  " + " ".join(cmd))
     if print_only:
         return 0
     rc = subprocess.call(cmd)
     if rc == 0:
-        print(f"MCP '{mcp_name}' registrato in Codex CLI. Verifica con /mcp nella TUI di codex.")
+        print(f"MCP '{mcp_name}' registered in Codex CLI. Verify with /mcp in Codex TUI.")
     return rc
 
 
@@ -92,7 +92,7 @@ def add_antigravity(mcp_name: str, python: Path, script: Path, kb_name: str, pri
                      source_folder: Path | None = None) -> int:
     rc = _merge_json_mcp_server(ANTIGRAVITY_CONFIG, mcp_name, _server_entry(python, script, kb_name), print_only)
     if rc == 0 and not print_only:
-        print("Riavvia Antigravity (o ricarica i MCP server) per applicare le modifiche.")
+        print("Restart Antigravity (or reload MCP servers) to apply changes.")
     return rc
 
 
@@ -102,7 +102,7 @@ def add_cursor(mcp_name: str, python: Path, script: Path, kb_name: str, print_on
     path = _cursor_config_path(source_folder)
     rc = _merge_json_mcp_server(path, mcp_name, _server_entry(python, script, kb_name), print_only)
     if rc == 0 and not print_only:
-        print("Riavvia Cursor (o ricarica i server MCP) per applicare le modifiche.")
+        print("Restart Cursor (or reload MCP servers) to apply changes.")
     return rc
 
 
@@ -118,21 +118,21 @@ CLIENTS = {
 # Remove a JSON-configured server only after successfully reading its config.
 def _remove_json_mcp_server(path: Path, mcp_name: str) -> int:
     if not path.exists():
-        print(f"File {path} non esiste.")
+        print(f"File {path} does not exist.")
         return 0
     try:
         config = json.loads(path.read_text())
     except Exception as e:
-        print(f"Errore nel caricamento di {path}: {e}")
+        print(f"Error loading {path}: {e}")
         return 1
     servers = config.get("mcpServers", {})
     if mcp_name in servers:
         servers.pop(mcp_name, None)
         shutil.copy(path, path.with_suffix(path.suffix + ".bak"))
         path.write_text(json.dumps(config, indent=2) + "\n")
-        print(f"Rimosso da {path}")
+        print(f"Removed from {path}")
     else:
-        print(f"Server '{mcp_name}' non trovato in {path}")
+        print(f"Server '{mcp_name}' not found in {path}")
     return 0
 
 
@@ -141,28 +141,28 @@ def remove_claude_code(mcp_name: str, source_folder: Path | None = None) -> int:
     cwd = Path.cwd()
     if (cwd / ".mcp.json").exists():
         cmd = ["claude", "mcp", "remove", "--scope", "project", mcp_name]
-        print(f"Comando di de-registrazione (progetto locale: {cwd}):\n  " + " ".join(cmd))
+        print(f"Unregistration command (local project: {cwd}):\n  " + " ".join(cmd))
         try:
             rc = subprocess.call(cmd, cwd=cwd)
             if rc == 0:
-                print(f"MCP '{mcp_name}' rimosso da {cwd}/.mcp.json.")
+                print(f"MCP '{mcp_name}' removed from {cwd}/.mcp.json.")
             else:
-                print(f"Fallito: comando ha restituito {rc}.")
+                print(f"Failed: command returned {rc}.")
             return rc
         except Exception as e:
-            print(f"Errore durante la rimozione da Claude Code: {e}")
+            print(f"Error removing from Claude Code: {e}")
             return 1
     cmd = ["claude", "mcp", "remove", mcp_name]
-    print("Nessun .mcp.json nella directory corrente; rimozione dal registro globale.\nComando di de-registrazione:\n  " + " ".join(cmd))
+    print("No .mcp.json in current directory; removing from global registry.\nUnregistration command:\n  " + " ".join(cmd))
     try:
         rc = subprocess.call(cmd)
         if rc == 0:
-            print(f"MCP '{mcp_name}' rimosso da Claude Code.")
+            print(f"MCP '{mcp_name}' removed from Claude Code.")
         else:
-            print(f"Fallito: comando ha restituito {rc}.")
+            print(f"Failed: command returned {rc}.")
         return rc
     except Exception as e:
-        print(f"Errore durante la rimozione da Claude Code: {e}")
+        print(f"Error removing from Claude Code: {e}")
         return 1
 
 
@@ -174,16 +174,16 @@ def remove_claude_desktop(mcp_name: str, source_folder: Path | None = None) -> i
 # Remove the server from Codex CLI global registration.
 def remove_codex(mcp_name: str, source_folder: Path | None = None) -> int:
     cmd = ["codex", "mcp", "remove", mcp_name]
-    print("Comando di de-registrazione:\n  " + " ".join(cmd))
+    print("Unregistration command:\n  " + " ".join(cmd))
     try:
         rc = subprocess.call(cmd)
         if rc == 0:
-            print(f"MCP '{mcp_name}' rimosso da Codex CLI.")
+            print(f"MCP '{mcp_name}' removed from Codex CLI.")
         else:
-            print(f"Fallito: comando ha restituito {rc}.")
+            print(f"Failed: command returned {rc}.")
         return rc
     except Exception as e:
-        print(f"Errore durante la rimozione da Codex: {e}")
+        print(f"Error removing from Codex: {e}")
         return 1
 
 

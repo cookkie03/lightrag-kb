@@ -276,21 +276,133 @@ def parse_claude_conversations(json_data: list[dict[str, Any]]) -> list[Normaliz
     return conversations
 
 
-# Detect whether json structure matches ChatGPT, Claude, or generic export.
+# Convert arbitrary JSON object or list of records into clean, readable Markdown structure.
+def _json_to_markdown_lines(obj: Any, depth: int = 1) -> list[str]:
+    lines: list[str] = []
+    indent = "  " * (depth - 1)
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)):
+                lines.append(f"{indent}- **{k}**:")
+                lines.extend(_json_to_markdown_lines(v, depth + 1))
+            else:
+                lines.append(f"{indent}- **{k}**: {v}")
+    elif isinstance(obj, list):
+        for idx, item in enumerate(obj):
+            if isinstance(item, (dict, list)):
+                lines.append(f"{indent}- Item {idx + 1}:")
+                lines.extend(_json_to_markdown_lines(item, depth + 1))
+            else:
+                lines.append(f"{indent}- {item}")
+    else:
+        lines.append(f"{indent}{obj}")
+    return lines
+
+
+# Parse Notion API block-based or database export JSON into NormalizedConversation.
+def parse_notion_export(data: dict[str, Any] | list[Any]) -> list[NormalizedConversation]:
+    blocks: list[dict[str, Any]] = []
+    title = "Notion Export"
+    if isinstance(data, dict):
+        if "results" in data and isinstance(data["results"], list):
+            blocks = [b for b in data["results"] if isinstance(b, dict)]
+        if "title" in data:
+            title = str(data["title"])
+    elif isinstance(data, list):
+        blocks = [b for b in data if isinstance(b, dict)]
+
+    doc_lines: list[str] = []
+    for block in blocks:
+        btype = block.get("type", "")
+        content_dict = block.get(btype, {})
+        text = ""
+        if isinstance(content_dict, dict) and "rich_text" in content_dict:
+            text = "".join(t.get("plain_text", "") for t in content_dict["rich_text"] if isinstance(t, dict))
+        elif isinstance(content_dict, dict) and "title" in content_dict:
+            text = "".join(t.get("plain_text", "") for t in content_dict["title"] if isinstance(t, dict))
+
+        if not text and "plain_text" in block:
+            text = str(block["plain_text"])
+
+        if btype.startswith("heading_1"):
+            doc_lines.append(f"# {text}")
+        elif btype.startswith("heading_2"):
+            doc_lines.append(f"## {text}")
+        elif btype.startswith("heading_3"):
+            doc_lines.append(f"### {text}")
+        elif btype == "bulleted_list_item":
+            doc_lines.append(f"- {text}")
+        elif btype == "numbered_list_item":
+            doc_lines.append(f"1. {text}")
+        elif btype == "quote":
+            doc_lines.append(f"> {text}")
+        elif text:
+            doc_lines.append(text)
+
+    body = "\n\n".join(doc_lines).strip()
+    if not body:
+        return []
+
+    return [
+        NormalizedConversation(
+            id=f"notion_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            title=title,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            messages=[NormalizedMessage(role="document", content=body)],
+            source="notion",
+        )
+    ]
+
+
+# Parse generic JSON data into a clean structured document.
+def parse_generic_json(raw_data: Any, title: str = "Generic JSON Export") -> list[NormalizedConversation]:
+    lines = _json_to_markdown_lines(raw_data)
+    body = "\n".join(lines).strip()
+    if not body:
+        return []
+
+    return [
+        NormalizedConversation(
+            id=f"json_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}",
+            title=title,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+            messages=[NormalizedMessage(role="document", content=body)],
+            source="generic_json",
+        )
+    ]
+
+
+# Detect whether json structure matches ChatGPT, Claude, Notion, Claude Code or generic export.
 def detect_and_parse_json(content: str) -> list[NormalizedConversation]:
-    data = json.loads(content)
+    try:
+        raw = json.loads(content)
+    except Exception:
+        return []
+
+    # Check Notion export format
+    if isinstance(raw, dict) and ("results" in raw or raw.get("object") in {"list", "page", "block"}):
+        notion_res = parse_notion_export(raw)
+        if notion_res:
+            return notion_res
+
+    data = raw
     if isinstance(data, dict):
         if "conversations" in data and isinstance(data["conversations"], list):
             data = data["conversations"]
+        elif "turns" in data and isinstance(data["turns"], list):
+            # Claude Code / Agent transcript
+            data = data["turns"]
         else:
             data = [data]
 
     if not data or not isinstance(data, list):
-        return []
+        return parse_generic_json(raw)
 
     first = data[0]
     if not isinstance(first, dict):
-        return []
+        return parse_generic_json(raw)
 
     # Distinguish ChatGPT (mapping tree) vs Claude (chat_messages list)
     if "mapping" in first or "current_node" in first:
@@ -298,10 +410,18 @@ def detect_and_parse_json(content: str) -> list[NormalizedConversation]:
     elif "chat_messages" in first or "uuid" in first:
         return parse_claude_conversations(data)
     elif "messages" in first and isinstance(first["messages"], list):
-        # Generic format
+        # Generic conversation format (Claude Code / OpenAI / Gemini / etc.)
         return parse_claude_conversations(data)
 
-    return []
+    # Notion list of blocks
+    if "type" in first and ("rich_text" in first.get(first.get("type", ""), {}) or "object" in first):
+        notion_res = parse_notion_export(data)
+        if notion_res:
+            return notion_res
+
+    # Fallback to robust generic JSON parser
+    return parse_generic_json(raw)
+
 
 
 # Heuristic patterns identifying stable user instructions, preferences, and environment facts.

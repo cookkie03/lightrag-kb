@@ -149,7 +149,7 @@ def test_linux_docling_config_defaults():
 
 
 def test_linux_docling_rejects_mac_ocr_options():
-    with pytest.raises(LinuxConfigurationError, match="OcrMacOptions non è supportato"):
+    with pytest.raises(LinuxConfigurationError, match="OcrMacOptions is not supported"):
         get_linux_docling_config({
             "DOCLING_PLATFORM": "linux",
             "DOCLING_OCR_ENGINE": "ocrmac",
@@ -157,7 +157,7 @@ def test_linux_docling_rejects_mac_ocr_options():
 
 
 def test_linux_docling_rejects_mps_accelerator():
-    with pytest.raises(LinuxConfigurationError, match="Acceleratore MPS non disponibile"):
+    with pytest.raises(LinuxConfigurationError, match="MPS accelerator not available"):
         get_linux_docling_config({
             "DOCLING_PLATFORM": "linux",
             "DOCLING_ACCELERATOR": "MPS",
@@ -165,7 +165,7 @@ def test_linux_docling_rejects_mps_accelerator():
 
 
 def test_linux_docling_rejects_whisper_turbo_mlx():
-    with pytest.raises(LinuxConfigurationError, match="WHISPER_TURBO_MLX è esclusivo per macOS"):
+    with pytest.raises(LinuxConfigurationError, match="WHISPER_TURBO_MLX is exclusive to macOS"):
         get_linux_docling_config({
             "DOCLING_PLATFORM": "linux",
             "DOCLING_ASR_ENGINE": "whisper_turbo_mlx",
@@ -279,7 +279,7 @@ def test_parse_audio_document_requires_ffmpeg(tmp_path: Path, monkeypatch):
     wav.write_bytes(b"RIFF dummy wav")
 
     monkeypatch.setattr("shutil.which", lambda prog: None)
-    with pytest.raises(ParserError, match="ffmpeg non trovato"):
+    with pytest.raises(ParserError, match="ffmpeg not found"):
         parse_audio_document(wav, env={"DOCLING_PLATFORM": "linux"})
 
 

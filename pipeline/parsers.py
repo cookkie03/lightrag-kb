@@ -102,17 +102,17 @@ def validate_safe_relative_path(
     """
     raw = str(path)
     if not raw:
-        raise SafePathError("Il percorso non può essere vuoto.")
+        raise SafePathError("Path cannot be empty.")
     if "\0" in raw:
-        raise SafePathError(f"Il percorso contiene byte NUL non ammessi: {repr(raw)}")
+        raise SafePathError(f"Path contains forbidden NUL bytes: {repr(raw)}")
 
     p = Path(raw)
     if p.is_absolute() or raw.startswith("/") or raw.startswith("\\") or (len(raw) > 1 and raw[1] == ":"):
-        raise SafePathError(f"Percorso assoluto non consentito nella sandbox: '{raw}'")
+        raise SafePathError(f"Absolute path not allowed in sandbox: '{raw}'")
 
     parts = p.parts
     if ".." in parts:
-        raise SafePathError(f"Directory traversal ('..') non consentito: '{raw}'")
+        raise SafePathError(f"Directory traversal ('..') not allowed: '{raw}'")
 
     normalized = os.path.normpath(raw)
     if (
@@ -121,7 +121,7 @@ def validate_safe_relative_path(
         or normalized.startswith(".." + os.sep)
         or normalized.startswith(".." + "/")
     ):
-        raise SafePathError(f"Percorso non valido o traversal rilevato: '{raw}'")
+        raise SafePathError(f"Invalid path or traversal detected: '{raw}'")
 
     if base_dir is not None:
         base = Path(base_dir).resolve()
@@ -129,23 +129,23 @@ def validate_safe_relative_path(
         try:
             resolved_candidate = candidate.resolve()
         except Exception as e:
-            raise SafePathError(f"Impossibile risolvere il percorso '{raw}': {e}") from e
+            raise SafePathError(f"Cannot resolve path '{raw}': {e}") from e
 
         # Ensure inside base
         try:
             resolved_candidate.relative_to(base)
         except ValueError:
-            raise SafePathError(f"Percorso '{raw}' tenta di uscire dalla sandbox '{base}'")
+            raise SafePathError(f"Path '{raw}' attempts to escape sandbox '{base}'")
 
         # Reject symlinks in any component when callers require an unaliased path.
         if not allow_symlinks and any((base / Path(*p.parts[:i])).is_symlink() for i in range(1, len(p.parts) + 1)):
-            raise SafePathError(f"Symlink non consentito: '{raw}'")
+            raise SafePathError(f"Symlink not allowed: '{raw}'")
         if candidate.is_symlink():
             try:
                 target_resolved = Path(os.path.realpath(candidate)).resolve()
                 target_resolved.relative_to(base)
             except ValueError:
-                raise SafePathError(f"Symlink '{raw}' punta all'esterno della sandbox '{base}'")
+                raise SafePathError(f"Symlink '{raw}' points outside sandbox '{base}'")
 
     return normalized
 
@@ -247,7 +247,7 @@ def get_linux_docling_config(env: dict[str, str] | None = None) -> dict[str, Any
         ocr_engine = "rapidocr" if platform == "linux" else "ocrmac"
     elif platform == "linux" and ocr_engine == "ocrmac":
         raise LinuxConfigurationError(
-            "OcrMacOptions non è supportato su Linux/Debian. Configura 'rapidocr' o 'easyocr'."
+            "OcrMacOptions is not supported on Linux/Debian. Configure 'rapidocr' or 'easyocr'."
         )
 
     accelerator = env.get("DOCLING_ACCELERATOR", "auto").strip().upper()
@@ -255,7 +255,7 @@ def get_linux_docling_config(env: dict[str, str] | None = None) -> dict[str, Any
         accelerator = "CPU"
     elif platform == "linux" and accelerator == "MPS":
         raise LinuxConfigurationError(
-            "Acceleratore MPS non disponibile su Linux/Debian. Usa 'CPU' o 'CUDA'."
+            "MPS accelerator not available on Linux/Debian. Use 'CPU' or 'CUDA'."
         )
 
     asr_engine = env.get("DOCLING_ASR_ENGINE", "auto").strip().lower()
@@ -263,8 +263,8 @@ def get_linux_docling_config(env: dict[str, str] | None = None) -> dict[str, Any
         asr_engine = "whisper_turbo_native"
     elif platform == "linux" and asr_engine == "whisper_turbo_mlx":
         raise LinuxConfigurationError(
-            "WHISPER_TURBO_MLX è esclusivo per macOS (Apple Silicon). "
-            "Su Linux/Debian usa 'whisper_turbo_native' o 'faster_whisper'."
+            "WHISPER_TURBO_MLX is exclusive to macOS (Apple Silicon). "
+            "On Linux/Debian use 'whisper_turbo_native' or 'faster_whisper'."
         )
 
     langs = [item.strip() for item in env.get("DOCLING_LANG", "it,en").split(",") if item.strip()]
@@ -305,7 +305,7 @@ def run_docling_subprocess(
     )
     if result.returncode != 0:
         err_msg = (result.stderr or result.stdout)[-600:].strip()
-        raise ParserError(f"{label} fallito (code {result.returncode}): {err_msg}")
+        raise ParserError(f"{label} failed (code {result.returncode}): {err_msg}")
     return result.stdout
 
 
@@ -335,7 +335,7 @@ def build_docling_visual_code(
         ocr_import = "OcrMacOptions"
         ocr_expr = f"OcrMacOptions(lang={locales!r}, force_full_page_ocr={force_full_page!r})"
     else:
-        raise LinuxConfigurationError(f"Motore OCR non supportato: {ocr_engine}")
+        raise LinuxConfigurationError(f"Unsupported OCR engine: {ocr_engine}")
 
     pipeline_imports = f"{ocr_import}, PdfPipelineOptions"
     table_setup = ""
@@ -433,7 +433,7 @@ def parse_text_file(
     """Parse a plain text, markdown, or code document."""
     p = Path(path)
     if not p.is_file():
-        raise FileNotFoundError(f"File non trovato: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
     b_sha = binary_sha256 or compute_file_sha256(p)
     raw_bytes = p.read_bytes()
@@ -508,7 +508,7 @@ def parse_visual_document(
     """Parse PDF or image document using Linux Docling with OCR fallback (§7)."""
     p = Path(path)
     if not p.is_file():
-        raise FileNotFoundError(f"File non trovato: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
     b_sha = binary_sha256 or compute_file_sha256(p)
     category = "pdf" if p.suffix.lower() in PDF_EXT else "images"
@@ -607,7 +607,7 @@ def parse_native_document(
     """Parse Office / ODF / EPUB / email documents using Docling native converter (§7)."""
     p = Path(path)
     if not p.is_file():
-        raise FileNotFoundError(f"File non trovato: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
     b_sha = binary_sha256 or compute_file_sha256(p)
     config = get_linux_docling_config(env)
@@ -618,7 +618,7 @@ def parse_native_document(
         config["python_bin"],
         code,
         config["timeout"],
-        f"Docling native su {p.name}",
+        f"Docling native on {p.name}",
     )
 
     d_hash = compute_text_sha256(markdown_content)
@@ -674,11 +674,11 @@ def parse_audio_document(
     """Parse audio or spoken video file using Linux ASR (whisper_turbo_native / faster-whisper) (§7)."""
     p = Path(path)
     if not p.is_file():
-        raise FileNotFoundError(f"File non trovato: {path}")
+        raise FileNotFoundError(f"File not found: {path}")
 
     if shutil.which("ffmpeg") is None:
         raise ParserError(
-            "ffmpeg non trovato sul PATH di Debian. Installalo per consentire la trascrizione ASR."
+            "ffmpeg not found on Debian PATH. Install it to enable ASR transcription."
         )
 
     b_sha = binary_sha256 or compute_file_sha256(p)
@@ -690,7 +690,7 @@ def parse_audio_document(
         config["python_bin"],
         code,
         config["timeout"],
-        f"Docling audio su {p.name}",
+        f"Docling audio on {p.name}",
     )
 
     d_hash = compute_text_sha256(markdown_content)
@@ -763,7 +763,7 @@ def parse_document(
             p, env=env, runner=runner, binary_sha256=binary_sha256, source_uri=source_uri
         )
 
-    raise UnsupportedFormatError(f"Estensione o formato non supportato: {p.suffix}")
+    raise UnsupportedFormatError(f"Unsupported format or extension: {p.suffix}")
 
 
 # -----------------------------------------------------------------------------
@@ -791,14 +791,14 @@ def save_derived_artifacts(
     # 1. Markdown artifact path: <derived_dir>/<category>/<relative_path>.md
     md_out_path = root / parsed["category"] / f"{rel.as_posix()}.md"
     if not md_out_path.resolve().is_relative_to(root):
-        raise SafePathError(f"Destinazione markdown non sicura: '{md_out_path}'")
+        raise SafePathError(f"Insecure markdown destination: '{md_out_path}'")
     md_out_path.parent.mkdir(parents=True, exist_ok=True)
     md_out_path.write_text(parsed["text_content"], encoding="utf-8")
 
     # 2. Sidecar artifact path: <derived_dir>/<category>/<relative_path>.sidecar.json
     sidecar_out_path = root / parsed["category"] / f"{rel.as_posix()}.sidecar.json"
     if not sidecar_out_path.resolve().is_relative_to(root):
-        raise SafePathError(f"Destinazione sidecar non sicura: '{sidecar_out_path}'")
+        raise SafePathError(f"Insecure sidecar destination: '{sidecar_out_path}'")
     sidecar_out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Also persist canonical sidecar index: <derived_dir>/sidecars/<canonical_doc_id>.json

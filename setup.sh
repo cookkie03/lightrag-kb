@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Setup post-clone per lightrag-kb (macOS/Linux; su Windows usa WSL o Git Bash).
-# Crea un unico runtime Python condiviso per ragcli, MCP, LightRAG, Docling e shim OAuth.
+# Post-clone setup for lightrag-kb (macOS/Linux; on Windows use WSL or Git Bash).
+# Creates a single shared Python runtime for ragcli, MCP, LightRAG, Docling, and OAuth shim.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,12 +83,12 @@ ensure_uv() {
     return
   fi
 
-  echo "==> Installo uv"
+  echo "==> Installing uv"
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
 
   if ! command -v uv >/dev/null 2>&1; then
-    echo "ERRORE: installazione di uv fallita." >&2
+    echo "ERROR: uv installation failed." >&2
     exit 1
   fi
 }
@@ -100,18 +100,18 @@ ensure_ollama() {
 
   case "$OS_NAME" in
     Linux|Darwin)
-      echo "==> Installo Ollama"
+      echo "==> Installing Ollama"
       curl -fsSL https://ollama.com/install.sh | sh
       hash -r
       ;;
     *)
-      echo "ERRORE: Ollama non trovato e installazione automatica non supportata su $OS_NAME." >&2
+      echo "ERROR: Ollama not found and automatic installation is not supported on $OS_NAME." >&2
       exit 1
       ;;
   esac
 
   if ! command -v ollama >/dev/null 2>&1; then
-    echo "ERRORE: installazione di Ollama fallita." >&2
+    echo "ERROR: Ollama installation failed." >&2
     exit 1
   fi
 }
@@ -122,7 +122,7 @@ pull_ollama_model() {
     return
   fi
 
-  echo "==> Scarico modello Ollama $model_name"
+  echo "==> Pulling Ollama model $model_name"
   ollama pull "$model_name"
 }
 
@@ -154,7 +154,7 @@ env = global_env()
 registry = load_registry(env)
 kb = find_kb(registry, name)
 if kb is None:
-    raise SystemExit(f"KB '{name}' non trovata.")
+    raise SystemExit(f"KB '{name}' not found.")
 write_kb_env(kb, env)
 PY
 }
@@ -163,14 +163,14 @@ echo "==> Repo: $REPO_DIR"
 
 ensure_uv
 
-echo "==> Creo runtime condiviso .venv"
+echo "==> Creating shared runtime .venv"
 if [ ! -d "$VENV_DIR" ]; then
   uv venv "$VENV_DIR"
 else
-  echo "    .venv esiste già, skip creazione"
+  echo "    .venv already exists, skipping creation"
 fi
 
-echo "==> Installo LightRAG, Docling, shim OAuth e dipendenze nel runtime condiviso"
+echo "==> Installing LightRAG, Docling, OAuth shim, and dependencies in shared runtime"
 uv pip install --python "$ENGINE_PY" \
   "lightrag-hku[api]" \
   ollama \
@@ -181,35 +181,35 @@ uv pip install --python "$ENGINE_PY" \
   pytest
 uv pip install --python "$ENGINE_PY" -r "$SHIM_DIR/requirements.txt"
 
-echo "==> Metto ragcli e lightrag-server in PATH"
+echo "==> Adding ragcli and lightrag-server to PATH"
 mkdir -p "$BIN_DIR"
 chmod +x bin/ragcli
 ln -sf "$REPO_DIR/bin/ragcli" "$BIN_DIR/ragcli"
 ln -sf "$VENV_DIR/bin/lightrag-server" "$BIN_DIR/lightrag-server"
-echo "    symlink creati in $BIN_DIR"
+echo "    symlinks created in $BIN_DIR"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*)
-    echo "    $BIN_DIR è già nel PATH"
+    echo "    $BIN_DIR is already in PATH"
     ;;
   *)
-    echo "    ATTENZIONE: $BIN_DIR non è nel PATH."
-    echo "    Aggiungi questa riga al tuo ~/.bashrc o ~/.zshrc:"
+    echo "    WARNING: $BIN_DIR is not in PATH."
+    echo "    Add this line to your ~/.bashrc or ~/.zshrc:"
     echo "        export PATH=\"$BIN_DIR:\$PATH\""
     ;;
 esac
 
 if [ ! -f "$GLOBAL_ENV" ]; then
-  echo "==> Creo config/global.env da global.env.example"
+  echo "==> Creating config/global.env from global.env.example"
   cp "$GLOBAL_EXAMPLE" "$GLOBAL_ENV"
 else
-  echo "==> config/global.env esiste già, lo aggiorno senza perdere i valori presenti"
+  echo "==> config/global.env already exists, updating without overwriting existing values"
 fi
 
 upsert_env_var "$GLOBAL_ENV" "ENGINE_PYTHON" "$VENV_DIR/bin/python"
 upsert_env_var "$GLOBAL_ENV" "LIGHTRAG_SERVER_BIN" "$VENV_DIR/bin/lightrag-server"
 upsert_env_var "$GLOBAL_ENV" "DOCLING_PYTHON" "$VENV_DIR/bin/python"
-upsert_env_var "$GLOBAL_ENV" "LLM_MODEL" "gemma4:e2b"
+upsert_env_var "$GLOBAL_ENV" "LLM_MODEL" "$(read_env_var "$GLOBAL_ENV" "LLM_MODEL" || echo 'qwen3.5:4b')"
 upsert_env_var "$GLOBAL_ENV" "DOCLING_PLATFORM" "$(docling_platform_for_os)"
 upsert_env_var "$GLOBAL_ENV" "MCP_BIND_HOST" "$(read_env_var "$GLOBAL_ENV" "MCP_BIND_HOST" || true)"
 upsert_env_var "$GLOBAL_ENV" "MCP_BIND_PORT" "$(read_env_var "$GLOBAL_ENV" "MCP_BIND_PORT" || true)"
@@ -233,7 +233,7 @@ for key in MCP_BIND_HOST MCP_BIND_PORT MCP_PATH SHIM_BIND_HOST SHIM_BIND_PORT TA
 done
 
 if [ ! -f "$SHIM_ENV" ]; then
-  echo "==> Creo la config dello shim da .env.example"
+  echo "==> Creating shim config from .env.example"
   cp "$SHIM_EXAMPLE" "$SHIM_ENV"
 fi
 
@@ -274,13 +274,13 @@ if [ "${LLM_PROVIDER:-ollama}" = "ollama" ]; then
 fi
 
 if [ "$OS_NAME" = "Linux" ]; then
-  echo "==> Installo unit systemd --user"
+  echo "==> Installing systemd --user units"
   "$ENGINE_PY" bin/ragcli.py service install-units
   systemctl --user daemon-reload
 
   if [ -n "${PUBLIC_MCP_KB:-}" ]; then
     if kb_exists "$PUBLIC_MCP_KB"; then
-      echo "==> Preparo env e servizi per la KB pubblica '$PUBLIC_MCP_KB'"
+      echo "==> Preparing env and services for public KB '$PUBLIC_MCP_KB'"
       write_public_kb_env "$PUBLIC_MCP_KB"
       systemctl --user enable --now "lightrag-server@${PUBLIC_MCP_KB}.service"
       systemctl --user enable --now "lightrag-watchdog@${PUBLIC_MCP_KB}.service"
@@ -288,35 +288,35 @@ if [ "$OS_NAME" = "Linux" ]; then
       systemctl --user enable --now obsidian-mcp-oauth-shim.service
       PUBLISH_READY=1
     else
-      echo "    PUBLIC_MCP_KB='$PUBLIC_MCP_KB' non trovata nel registry: salto avvio servizi pubblici"
+      echo "    PUBLIC_MCP_KB='$PUBLIC_MCP_KB' not found in registry: skipping public services startup"
     fi
   else
-    echo "    PUBLIC_MCP_KB non configurata: installo solo le unit senza avviare MCP pubblico e shim"
+    echo "    PUBLIC_MCP_KB not configured: installing units only without starting public MCP and shim"
   fi
 
   if [ "$PUBLISH_READY" -eq 1 ] && command -v tailscale >/dev/null 2>&1; then
-    echo "==> Configuro publish Tailscale per lo shim"
+    echo "==> Configuring Tailscale publish for shim"
     tailscale serve --bg "${TAILSCALE_FUNNEL_PORT:-8443}" "http://${SHIM_BIND_HOST:-127.0.0.1}:${SHIM_BIND_PORT:-8420}"
     tailscale funnel --bg "${TAILSCALE_FUNNEL_PORT:-8443}"
     tailscale funnel status || true
   elif [ "$PUBLISH_READY" -eq 1 ]; then
-    echo "    Tailscale non trovato: salto la publish pubblica dello shim"
+    echo "    Tailscale not found: skipping public shim publish"
   else
-    echo "    Publish Tailscale non configurato perché il backend MCP pubblico non è stato avviato"
+    echo "    Tailscale publish not configured because public MCP backend was not started"
   fi
 else
-  echo "==> Sistema non Linux: salto installazione systemd --user e Funnel"
+  echo "==> Non-Linux system: skipping systemd --user installation and Funnel"
 fi
 
-echo "==> Verifica finale"
+echo "==> Final verification"
 "$BIN_DIR/ragcli" doctor || true
 
-echo "==> Setup completato."
-echo "    Comandi utili:"
+echo "==> Setup completed."
+echo "    Useful commands:"
 echo "      ragcli doctor"
 echo "      ragcli service status"
 if [ "$PUBLISH_READY" -eq 1 ] && [ -n "${SHIM_PUBLIC_URL:-}" ]; then
-  echo "      URL pubblico shim: $SHIM_PUBLIC_URL/mcp"
+  echo "      Public shim URL: $SHIM_PUBLIC_URL/mcp"
 elif [ -n "${SHIM_PUBLIC_URL:-}" ]; then
-  echo "      URL shim configurato (non pubblicato): $SHIM_PUBLIC_URL/mcp"
+  echo "      Configured shim URL (not published): $SHIM_PUBLIC_URL/mcp"
 fi

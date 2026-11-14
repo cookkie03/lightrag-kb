@@ -171,3 +171,40 @@ def test_import_archive_to_kb_full_pipeline():
         pref_files = list((source_dir / "memories" / "preferences").rglob("*.md"))
         assert len(pref_files) == 1
         assert "porta 9621" in pref_files[0].read_text()
+
+
+def test_parse_notion_export_json():
+    notion_data = {
+        "title": "Notion Meeting Notes",
+        "results": [
+            {
+                "type": "heading_1",
+                "heading_1": {"rich_text": [{"plain_text": "Meeting Agenda"}]}
+            },
+            {
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": [{"plain_text": "Decision on database schema"}]}
+            }
+        ]
+    }
+    parsed = detect_and_parse_json(json.dumps(notion_data))
+    assert len(parsed) == 1
+    conv = parsed[0]
+    assert conv.source == "notion"
+    content = conv.messages[0].content
+    assert "# Meeting Agenda" in content
+    assert "- Decision on database schema" in content
+
+
+def test_parse_generic_json_export():
+    generic_data = {
+        "project": "LightRAG-KB",
+        "settings": {"mode": "production", "workers": 4},
+        "tags": ["rag", "llm", "offline"]
+    }
+    parsed = detect_and_parse_json(json.dumps(generic_data))
+    assert len(parsed) == 1
+    content = parsed[0].messages[0].content
+    assert "LightRAG-KB" in content
+    assert "production" in content
+    assert "rag" in content

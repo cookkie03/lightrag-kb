@@ -817,9 +817,41 @@ def main() -> None:
     )
     parser.add_argument("--kb", required=True)
     parser.add_argument("--force", action="store_true", help="rigenera cache, derivati e riallinea la KB")
+    parser.add_argument("--pipelines", help="Categorie di pipeline abilitate separate da virgola (text,pdf,images,office,audio)")
+    parser.add_argument("--no-text", action="store_true", help="Disabilita la pipeline di testo e codice")
+    parser.add_argument("--no-pdf", action="store_true", help="Disabilita la pipeline per documenti PDF")
+    parser.add_argument("--no-images", action="store_true", help="Disabilita la pipeline per immagini")
+    parser.add_argument("--no-office", action="store_true", help="Disabilita la pipeline per documenti Office/ODF/EPUB")
+    parser.add_argument("--no-audio", action="store_true", help="Disabilita la pipeline per file audio/video")
     args = parser.parse_args()
 
     env = global_env()
+    all_categories = {"text", "pdf", "images", "office", "audio"}
+    if args.pipelines:
+        enabled_pipelines = {p.strip().lower() for p in args.pipelines.split(",") if p.strip()}
+    else:
+        enabled_pipelines = set()
+        for cat in all_categories:
+            cfg_val = env.get(f"PIPELINE_ENABLE_{cat.upper()}", "1").strip().lower()
+            if cfg_val not in {"0", "false", "no", "off"}:
+                enabled_pipelines.add(cat)
+
+    if args.no_text:
+        enabled_pipelines.discard("text")
+    if args.no_pdf:
+        enabled_pipelines.discard("pdf")
+    if args.no_images:
+        enabled_pipelines.discard("images")
+    if args.no_office:
+        enabled_pipelines.discard("office")
+    if args.no_audio:
+        enabled_pipelines.discard("audio")
+
+    disabled_pipelines = all_categories - enabled_pipelines
+    if disabled_pipelines:
+        print(f"Pipelines disabilitate: {', '.join(sorted(disabled_pipelines))}")
+    print(f"Pipelines attive: {', '.join(sorted(enabled_pipelines))}")
+
     registry = load_registry(env)
     kb = find_kb(registry, args.kb)
     if not kb:
@@ -866,9 +898,13 @@ def main() -> None:
     for path in candidates:
         rel = path.relative_to(source_dir).as_posix()
         present_rel.add(rel)
+        category = category_for(path)
+        if category not in enabled_pipelines:
+            if rel in manifest:
+                next_manifest[rel] = manifest[rel]
+            continue
         old_entry = manifest.get(rel, {})
         current_hash = file_hash(path)
-        category = category_for(path)
         entry = _manifest_entry(rel, path, current_hash, category, old_entry if not args.force else None)
         source_changed = bool(
             args.force

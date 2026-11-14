@@ -764,6 +764,34 @@ class KBRouter:
                 "message": str(exc),
             })
 
+    def ingest_url(
+        self,
+        kb: str,
+        url: str,
+        subfolder: str = "media",
+        auto_index: bool = True,
+        custom_title: str | None = None,
+    ) -> str:
+        """Download media from YouTube, Soundcloud, Instagram, TikTok, etc. via yt-dlp, transcribe with Whisper, and ingest into KB."""
+        try:
+            from bin.url_importer import import_media_url_to_kb
+            result = import_media_url_to_kb(
+                kb_name=kb,
+                url=url,
+                subfolder=subfolder,
+                auto_index=auto_index,
+                custom_title=custom_title,
+            )
+            return _serialize(result)
+        except Exception as exc:
+            return _serialize({
+                "error": "MEDIA_IMPORT_FAILED",
+                "kb": kb,
+                "url": url,
+                "message": str(exc),
+            })
+
+
 
 def build_mcp_server(router: KBRouter | None = None) -> FastMCP:
     """Build and configure the FastMCP router instance exposing §6 tools."""
@@ -903,6 +931,23 @@ def build_mcp_server(router: KBRouter | None = None) -> FastMCP:
             superseded_by=superseded_by,
         )
 
+    @mcp_app.tool()
+    def ingest_url(
+        kb: str,
+        url: str,
+        subfolder: str = "media",
+        auto_index: bool = True,
+        custom_title: str | None = None,
+    ) -> str:
+        """Download media from YouTube, Soundcloud, Instagram, TikTok, etc. via yt-dlp, transcribe with Whisper, and ingest into KB."""
+        return active_router.ingest_url(
+            kb=kb,
+            url=url,
+            subfolder=subfolder,
+            auto_index=auto_index,
+            custom_title=custom_title,
+        )
+
     return mcp_app
 
 
@@ -917,6 +962,7 @@ retrieve_context = router.retrieve_context
 find_documents = router.find_documents
 job_status = router.job_status
 evidence = router.evidence
+ingest_url = router.ingest_url
 discover_duplicates = router.discover_duplicates
 compare_folders = router.compare_folders
 remember = router.remember

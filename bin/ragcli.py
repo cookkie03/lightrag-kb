@@ -37,6 +37,7 @@ from kb_registry import (
     split_exclude_specs,
     save_registry,
     storage_mode,
+    upsert_global_env,
     write_kb_env,
 )
 from bin.archive_importer import import_archive_to_kb
@@ -626,6 +627,11 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     cmd = [str(engine_python), str(INGEST_SCRIPT), "--kb", args.name]
     if args.force:
         cmd.append("--force")
+    if getattr(args, "pipelines", None):
+        cmd.extend(["--pipelines", args.pipelines])
+    for cat in ("text", "pdf", "images", "office", "audio"):
+        if getattr(args, f"no_{cat}", False):
+            cmd.append(f"--no-{cat}")
     sys.exit(subprocess.call(cmd, env=merged_runtime_env(kb, env)))
 
 
@@ -826,6 +832,19 @@ def cmd_import_archive(args: argparse.Namespace) -> None:
     print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
 
 
+def cmd_import_url(args: argparse.Namespace) -> None:
+    from bin.url_importer import import_media_url_to_kb
+    res = import_media_url_to_kb(
+        kb_name=args.kb,
+        url=args.url,
+        subfolder=args.subfolder,
+        auto_index=not args.no_index,
+        custom_title=args.title,
+    )
+    print(json.dumps({"ok": True, "result": res}, indent=2, ensure_ascii=False))
+
+
+
 def cmd_hook_inject(args: argparse.Namespace) -> None:
     prompt = args.prompt
     if not prompt and not sys.stdin.isatty():
@@ -855,6 +874,181 @@ def cmd_hook_install(args: argparse.Namespace) -> None:
         target_project_dir=args.project_dir,
     )
     print(json.dumps(res, indent=2, ensure_ascii=False))
+
+
+def _format_on_off(val: str | None, default: str = "1") -> str:
+    active = (val if val is not None else default).strip().lower() not in {"0", "false", "no", "off"}
+    return "[ON]" if active else "[OFF]"
+
+
+# Display central configuration panel organized by pipeline phases.
+def cmd_config_show(_args: argparse.Namespace) -> None:
+    env = global_env()
+    print("=" * 70)
+    print("                   LIGHTRAG-KB CONFIGURATION PANEL")
+    print("=" * 70)
+    print("\n[FASE 1: DISCOVERY & HASHING]")
+    print("  Hash Algorithm:       SHA256 (rilevamento modifiche su sorgente)")
+    print("  Storage Format:       JSON atomico protetto da flock (no SQLite/Neo4j)")
+    print("  Derived Artifacts:    .lightrag/derived/ (cache markdown normalizzata)")
+
+    print("\n[FASE 2: PARSING & EXTRACTION (DOCLING + NATIVE)]")
+    print(f"  Pipeline Text/Code:   {_format_on_off(env.get('PIPELINE_ENABLE_TEXT')):<6} (PIPELINE_ENABLE_TEXT)")
+    print(f"  Pipeline PDF:         {_format_on_off(env.get('PIPELINE_ENABLE_PDF')):<6} (PIPELINE_ENABLE_PDF)")
+    print(f"  Pipeline Images:      {_format_on_off(env.get('PIPELINE_ENABLE_IMAGES')):<6} (PIPELINE_ENABLE_IMAGES)")
+    print(f"  Pipeline Office/ODF:  {_format_on_off(env.get('PIPELINE_ENABLE_OFFICE')):<6} (PIPELINE_ENABLE_OFFICE)")
+    print(f"  Pipeline Audio/Video: {_format_on_off(env.get('PIPELINE_ENABLE_AUDIO')):<6} (PIPELINE_ENABLE_AUDIO)")
+    print(f"  ASR Engine:           {env.get('DOCLING_ASR_ENGINE', 'whisper_turbo_native')} (Whisper)")
+    print(f"  OCR Engine:           {env.get('DOCLING_OCR_ENGINE', 'auto')} (Docling Linux: easyocr/rapidocr)")
+    print(f"  Table Extraction:     {_format_on_off(env.get('DOCLING_ENABLE_TABLES')):<6} (DOCLING_ENABLE_TABLES)")
+    print(f"  Code Enrichment:      {_format_on_off(env.get('DOCLING_ENABLE_CODE_ENRICHMENT')):<6} (DOCLING_ENABLE_CODE_ENRICHMENT)")
+    print(f"  Formula Enrichment:   {_format_on_off(env.get('DOCLING_ENABLE_FORMULA_ENRICHMENT')):<6} (DOCLING_ENABLE_FORMULA_ENRICHMENT)")
+
+    print("\n[FASE 3: CHUNKING & GRAPH EXTRACTION]")
+    print(f"  Chunk Size:           {env.get('CHUNK_SIZE', '800')} tokens")
+    print(f"  Chunk Overlap:        {env.get('CHUNK_OVERLAP_SIZE', '80')} tokens")
+    print(f"  Max Gleaning:         {env.get('MAX_GLEANING', '1')} pass (estrazione entità/relazioni)")
+    print(f"  Summary Language:     {env.get('SUMMARY_LANGUAGE', 'Italian, English')}")
+
+    print("\n[FASE 4: EMBEDDING & LLM (OLLAMA)]")
+    print(f"  Provider:             {env.get('LLM_PROVIDER', 'ollama')}")
+    print(f"  Ollama Host:          {env.get('OLLAMA_HOST', 'http://localhost:11434')}")
+    print(f"  LLM Model:            {env.get('LLM_MODEL', 'qwen3.5:4b')}")
+    print(f"  Embedding Model:      {env.get('EMBEDDING_MODEL', 'embeddinggemma-2:latest')} (dim: {env.get('EMBEDDING_DIM', '768')})")
+    print(f"  Max Async:            {env.get('MAX_ASYNC', '1')} (concorrenza LLM)")
+    print(f"  LLM Timeout:          {env.get('LLM_TIMEOUT', '900')}s")
+    print("=" * 70)
+
+
+# Set configuration parameters atomically and update global.env.
+def cmd_config_set(args: argparse.Namespace) -> None:
+    updates: dict[str, str] = {}
+    if getattr(args, "enable_text", False):
+        updates["PIPELINE_ENABLE_TEXT"] = "1"
+    if getattr(args, "disable_text", False):
+        updates["PIPELINE_ENABLE_TEXT"] = "0"
+
+    if getattr(args, "enable_pdf", False):
+        updates["PIPELINE_ENABLE_PDF"] = "1"
+    if getattr(args, "disable_pdf", False):
+        updates["PIPELINE_ENABLE_PDF"] = "0"
+
+    if getattr(args, "enable_images", False):
+        updates["PIPELINE_ENABLE_IMAGES"] = "1"
+    if getattr(args, "disable_images", False):
+        updates["PIPELINE_ENABLE_IMAGES"] = "0"
+
+    if getattr(args, "enable_office", False):
+        updates["PIPELINE_ENABLE_OFFICE"] = "1"
+    if getattr(args, "disable_office", False):
+        updates["PIPELINE_ENABLE_OFFICE"] = "0"
+
+    if getattr(args, "enable_audio", False):
+        updates["PIPELINE_ENABLE_AUDIO"] = "1"
+    if getattr(args, "disable_audio", False):
+        updates["PIPELINE_ENABLE_AUDIO"] = "0"
+
+    if getattr(args, "enable_tables", False):
+        updates["DOCLING_ENABLE_TABLES"] = "1"
+    if getattr(args, "disable_tables", False):
+        updates["DOCLING_ENABLE_TABLES"] = "0"
+
+    if getattr(args, "enable_code", False):
+        updates["DOCLING_ENABLE_CODE_ENRICHMENT"] = "1"
+    if getattr(args, "disable_code", False):
+        updates["DOCLING_ENABLE_CODE_ENRICHMENT"] = "0"
+
+    if getattr(args, "enable_formula", False):
+        updates["DOCLING_ENABLE_FORMULA_ENRICHMENT"] = "1"
+    if getattr(args, "disable_formula", False):
+        updates["DOCLING_ENABLE_FORMULA_ENRICHMENT"] = "0"
+
+    if getattr(args, "llm", None):
+        updates["LLM_MODEL"] = args.llm
+    if getattr(args, "embedding", None):
+        updates["EMBEDDING_MODEL"] = args.embedding
+        if not getattr(args, "dim", None):
+            emb_lower = args.embedding.lower()
+            if "embeddinggemma-2" in emb_lower:
+                updates["EMBEDDING_DIM"] = "768"
+            elif "qwen3-embedding:0.6b" in emb_lower:
+                updates["EMBEDDING_DIM"] = "1024"
+            elif "qwen3-embedding:4b" in emb_lower or "qwen3-embedding:latest" in emb_lower:
+                updates["EMBEDDING_DIM"] = "2560"
+
+    if getattr(args, "dim", None):
+        updates["EMBEDDING_DIM"] = str(args.dim)
+
+    if getattr(args, "asr", None):
+        asr_val = args.asr.strip().lower()
+        if not asr_val.startswith("whisper"):
+            sys.exit(
+                f"Errore: al momento è supportato solo Whisper per la trascrizione "
+                f"(es. whisper_turbo_native, whisper_turbo, whisper_s2t). Ricevuto: {args.asr}"
+            )
+        updates["DOCLING_ASR_ENGINE"] = asr_val
+
+    if getattr(args, "ollama_host", None):
+        updates["OLLAMA_HOST"] = args.ollama_host
+
+    if getattr(args, "chunk_size", None):
+        updates["CHUNK_SIZE"] = str(args.chunk_size)
+    if getattr(args, "chunk_overlap", None):
+        updates["CHUNK_OVERLAP_SIZE"] = str(args.chunk_overlap)
+
+    if not updates:
+        print("Nessun parametro specificato. Usa `ragcli config set --help`.")
+        return
+
+    upsert_global_env(updates)
+    print("Configurazione aggiornata con successo:")
+    for k, v in updates.items():
+        print(f"  {k} = {v}")
+
+    if getattr(args, "kb", None):
+        env = global_env()
+        registry = load_registry(env)
+        kb = find_kb(registry, args.kb)
+        if not kb:
+            sys.exit(f"KB '{args.kb}' non trovata.")
+        write_kb_env(kb, env)
+        print(f"Ambiente locale per KB '{args.kb}' sincronizzato.")
+
+
+# Query and display available Ollama models.
+def cmd_config_models(_args: argparse.Namespace) -> None:
+    env = global_env()
+    host = env.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
+    if "localhost" in host:
+        host = host.replace("localhost", "127.0.0.1")
+    try:
+        res = requests.get(f"{host}/api/tags", timeout=5)
+        res.raise_for_status()
+        data = res.json()
+        models = data.get("models", [])
+    except Exception as exc:
+        sys.exit(f"Impossibile contattare Ollama su {host}: {exc}")
+
+    current_llm = env.get("LLM_MODEL", "")
+    current_emb = env.get("EMBEDDING_MODEL", "")
+
+    print(f"\nModelli disponibili su Ollama ({host}):")
+    print(f"{'NOME':<42} {'DIMENSIONE':<12} {'RUOLO ATTIVO':<20}")
+    print("-" * 76)
+    for m in models:
+        name = m.get("name", "")
+        size_bytes = m.get("size", 0)
+        size_gb = f"{size_bytes / (1024**3):.1f} GB" if size_bytes else "-"
+        role = ""
+        if name == current_llm:
+            role = "[LLM ATTIVO]"
+        elif name == current_emb:
+            role = "[EMBEDDING ATTIVO]"
+        print(f"{name:<42} {size_gb:<12} {role:<20}")
+
+    print("\nModello di trascrizione audio (ASR):")
+    print(f"  Engine corrente: {env.get('DOCLING_ASR_ENGINE', 'whisper_turbo_native')} (solo Whisper supportato)")
+
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -897,6 +1091,12 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = sub.add_parser("ingest", help="sync incrementale della sorgente verso la KB gia avviata")
     ingest.add_argument("name")
     ingest.add_argument("--force", action="store_true", help="rigenera derivati e riallinea forzatamente la KB")
+    ingest.add_argument("--pipelines", help="categorie di pipeline abilitate separate da virgola (text,pdf,images,office,audio)")
+    ingest.add_argument("--no-text", action="store_true", help="disabilita la pipeline per file di testo/codice")
+    ingest.add_argument("--no-pdf", action="store_true", help="disabilita la pipeline per documenti PDF")
+    ingest.add_argument("--no-images", action="store_true", help="disabilita la pipeline per immagini")
+    ingest.add_argument("--no-office", action="store_true", help="disabilita la pipeline per file Office/ODF/EPUB")
+    ingest.add_argument("--no-audio", action="store_true", help="disabilita la pipeline per audio e video")
     ingest.set_defaults(func=cmd_ingest)
 
     exclude_help = (
@@ -1035,6 +1235,16 @@ def build_parser() -> argparse.ArgumentParser:
     imp_p.add_argument("--format", choices=("auto", "chatgpt", "claude", "gemini", "generic"), default="auto")
     imp_p.set_defaults(func=cmd_import_archive)
 
+    # import-url command (yt-dlp + whisper)
+    url_p = sub.add_parser("import-url", help="scarica media da YouTube, Soundcloud, Instagram, TikTok con yt-dlp, trascrive con Whisper e indicizza nella KB")
+    url_p.add_argument("kb", help="nome della KB")
+    url_p.add_argument("url", help="URL media (YouTube, Soundcloud, Instagram, TikTok, ecc.)")
+    url_p.add_argument("--title", default=None, help="titolo personalizzato")
+    url_p.add_argument("--subfolder", default="media", help="sottocartella in source_dir (default: media)")
+    url_p.add_argument("--no-index", action="store_true", help="non inviare al server LightRAG (salva solo il file markdown)")
+    url_p.set_defaults(func=cmd_import_url)
+
+
     # hook command
     hook_parser = sub.add_parser("hook", help="hook per coding agents (pre-prompt e post-session)")
     hook_sub = hook_parser.add_subparsers(dest="hook_cmd", required=True)
@@ -1056,6 +1266,43 @@ def build_parser() -> argparse.ArgumentParser:
     hinst_p.add_argument("--kb", default="agent-memory")
     hinst_p.add_argument("--project-dir", default=None)
     hinst_p.set_defaults(func=cmd_hook_install)
+
+    cfg_parser = sub.add_parser("config", help="pannello di configurazione centralizzato (fasi pipeline, modelli e runtime)")
+    cfg_sub = cfg_parser.add_subparsers(dest="config_cmd")
+    cfg_parser.set_defaults(func=cmd_config_show)
+
+    cfg_show = cfg_sub.add_parser("show", help="mostra la configurazione globale organizzata per fasi di pipeline")
+    cfg_show.set_defaults(func=cmd_config_show)
+
+    cfg_set = cfg_sub.add_parser("set", help="modifica i parametri e attiva/disattiva elementi di pipeline")
+    cfg_set.add_argument("--enable-text", action="store_true", help="attiva pipeline testo/codice")
+    cfg_set.add_argument("--disable-text", action="store_true", help="disattiva pipeline testo/codice")
+    cfg_set.add_argument("--enable-pdf", action="store_true", help="attiva pipeline PDF")
+    cfg_set.add_argument("--disable-pdf", action="store_true", help="disattiva pipeline PDF")
+    cfg_set.add_argument("--enable-images", action="store_true", help="attiva pipeline immagini")
+    cfg_set.add_argument("--disable-images", action="store_true", help="disattiva pipeline immagini")
+    cfg_set.add_argument("--enable-office", action="store_true", help="attiva pipeline office/ODF")
+    cfg_set.add_argument("--disable-office", action="store_true", help="disattiva pipeline office/ODF")
+    cfg_set.add_argument("--enable-audio", action="store_true", help="attiva pipeline audio/video")
+    cfg_set.add_argument("--disable-audio", action="store_true", help="disattiva pipeline audio/video")
+    cfg_set.add_argument("--enable-tables", action="store_true", help="attiva estrazione tabelle Docling")
+    cfg_set.add_argument("--disable-tables", action="store_true", help="disattiva estrazione tabelle Docling")
+    cfg_set.add_argument("--enable-code", action="store_true", help="attiva arricchimento codice Docling")
+    cfg_set.add_argument("--disable-code", action="store_true", help="disattiva arricchimento codice Docling")
+    cfg_set.add_argument("--enable-formula", action="store_true", help="attiva arricchimento formule Docling")
+    cfg_set.add_argument("--disable-formula", action="store_true", help="disattiva arricchimento formule Docling")
+    cfg_set.add_argument("--llm", help="modello LLM (es. qwen3.5:4b)")
+    cfg_set.add_argument("--embedding", help="modello embedding (es. embeddinggemma-2:latest)")
+    cfg_set.add_argument("--dim", type=int, help="dimensione embedding (es. 768 per embeddinggemma-2)")
+    cfg_set.add_argument("--asr", help="modello trascrizione (solo Whisper: whisper_turbo_native, whisper_turbo, whisper_s2t)")
+    cfg_set.add_argument("--ollama-host", help="URL host Ollama (es. http://localhost:11434)")
+    cfg_set.add_argument("--chunk-size", type=int, help="dimensione chunk in token")
+    cfg_set.add_argument("--chunk-overlap", type=int, help="sovrapposizione chunk in token")
+    cfg_set.add_argument("--kb", help="nome KB opzionale per sincronizzare il relativo .env")
+    cfg_set.set_defaults(func=cmd_config_set)
+
+    cfg_models = cfg_sub.add_parser("models", help="elenca i modelli disponibili su Ollama e lo stato attivo")
+    cfg_models.set_defaults(func=cmd_config_models)
 
     return parser
 
