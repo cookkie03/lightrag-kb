@@ -148,8 +148,9 @@ async def test_mcp_server_tools_registered(mock_kb_environment):
 # -----------------------------------------------------------------------------
 
 
-def test_list_kbs_offline_when_servers_down(mock_kb_environment):
+def test_list_kbs_offline_when_servers_down(mock_kb_environment, monkeypatch):
     router: KBRouter = mock_kb_environment["router"]
+    monkeypatch.setattr(router, "check_server_health", lambda port: False)
     res_raw = router.list_kbs()
     res = json.loads(res_raw)
 
