@@ -220,7 +220,7 @@ def test_client_insert_transient_409_exhausted(mock_session):
     # 5 transient conflicts exceeds 2 retries
     mock_session.transient_409_countdown["busy_doc"] = 5
 
-    with pytest.raises(TransientConflictError, match="pipeline occupata"):
+    with pytest.raises(TransientConflictError, match="pipeline busy|pipeline occupata"):
         client.insert_text("Some text", file_source="busy_doc", retries=2, backoff_base=0.01)
 
 
@@ -230,7 +230,7 @@ def test_client_insert_unverified_409_rejected(mock_session):
     mock_session.inject_duplicate_409_unverified = True
 
     # 409 claims duplicate, but document is NOT in server -> MUST raise UnverifiedDuplicateError
-    with pytest.raises(UnverifiedDuplicateError, match="verifica sul server ha dato esito negativo"):
+    with pytest.raises(UnverifiedDuplicateError, match="server verification failed|verifica sul server ha dato esito negativo"):
         client.insert_text("Some text", file_source="ghost_doc", retries=1, backoff_base=0.01)
 
 
@@ -378,7 +378,7 @@ def test_protected_indexer_modify_unshared_with_recovery(memory_catalog: Catalog
     }
 
     # Update should fail AND trigger recovery from old checkpoint!
-    with pytest.raises(RecoverySucceededError, match="recovery da checkpoint ha ripristinato"):
+    with pytest.raises(RecoverySucceededError, match="recovery successfully restored|recovery da checkpoint ha ripristinato"):
         indexer.update_modified(parsed_new, "src1", "doc.md", 60, 200, artifact_path=new_art)
 
     # Verify that previous state was restored in catalog

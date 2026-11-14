@@ -152,8 +152,8 @@ class KBWriterLock:
             except (BlockingIOError, OSError) as exc:
                 if (time.time() - start_time) >= timeout:
                     raise KBLockedError(
-                        f"Impossibile acquisire il lock per la KB '{self.kb_id}' "
-                        f"(lockfile: {self.lock_path}): un altro writer è attivo."
+                        f"Cannot acquire lock for KB '{self.kb_id}' "
+                        f"(lockfile: {self.lock_path}): another writer is active."
                     ) from exc
                 time.sleep(poll_interval)
 
@@ -355,7 +355,7 @@ class LightRAGClient:
                         time.sleep(sleep_s)
                         continue
                     raise TransientConflictError(
-                        f"LightRAG pipeline occupata (409) dopo {retries} tentativi per '{file_source}': {detail}"
+                        f"LightRAG pipeline busy (409) after {retries} attempts for '{file_source}': {detail}"
                     )
 
                 # Case 2: Claim of existing duplicate
@@ -372,7 +372,7 @@ class LightRAGClient:
                     # PROVE IT! Verify if doc actually exists in LightRAG
                     existing = self.find_document_by_file_source(file_source)
                     if existing is not None:
-                        logger.info("409 duplicato verificato per '%s' (id: %s)", file_source, existing.get("id"))
+                        logger.info("409 duplicate verified for '%s' (id: %s)", file_source, existing.get("id"))
                         return {
                             "status": "duplicate_verified",
                             "file_source": file_source,
@@ -380,8 +380,8 @@ class LightRAGClient:
                         }
                     # NOT PROVEN: Raise unverified error!
                     raise UnverifiedDuplicateError(
-                        f"LightRAG ha risposto 409 duplicato per '{file_source}', "
-                        f"ma la verifica sul server ha dato esito negativo (documento non trovato)."
+                        f"LightRAG returned 409 duplicate for '{file_source}', "
+                        f"but server verification failed (document not found)."
                     )
 
                 # Case 3: Other 409 conflicts
@@ -389,15 +389,15 @@ class LightRAGClient:
                     time.sleep(backoff_base * (2 ** (attempt - 1)))
                     continue
                 raise LightRAGConflictError(
-                    f"409 Conflict non risolto per '{file_source}': {detail}"
+                    f"Unresolved 409 Conflict for '{file_source}': {detail}"
                 )
 
             # Non-409 error
             raise LightRAGError(
-                f"Chiamata a LightRAG fallita con status {resp.status_code}: {resp.text}"
+                f"LightRAG request failed with status {resp.status_code}: {resp.text}"
             )
 
-        raise LightRAGError(f"Impossibile inserire '{file_source}' dopo {retries} tentativi.")
+        raise LightRAGError(f"Cannot insert '{file_source}' after {retries} attempts.")
 
     def delete_documents(
         self,
@@ -459,15 +459,15 @@ class LightRAGClient:
                 if status == "PROCESSED":
                     return doc
                 if status == "FAILED":
-                    err = doc.get("error_message") or doc.get("detail") or "Stato FAILED in LightRAG"
+                    err = doc.get("error_message") or doc.get("detail") or "FAILED status in LightRAG"
                     raise DocumentIndexingFailedError(
-                        f"Indicizzazione fallita in LightRAG per '{file_source}': {err}"
+                        f"Indexing failed in LightRAG for '{file_source}': {err}"
                     )
 
             time.sleep(poll_interval)
 
         raise DocumentIndexingTimeoutError(
-            f"Timeout ({timeout}s) in attesa di stato PROCESSED per '{file_source}'"
+            f"Timeout ({timeout}s) waiting for PROCESSED status for '{file_source}'"
         )
 
 
@@ -521,7 +521,7 @@ class ProtectedIndexer:
             if chk_path.exists():
                 chk_path.unlink()
         except OSError as exc:
-            logger.warning("Impossibile rimuovere il file di checkpoint %s: %s", chk_path, exc)
+            logger.warning("Failed to remove checkpoint file %s: %s", chk_path, exc)
 
     def recover_pending_checkpoints(self) -> list[str]:
         """Scan and recover any in-flight checkpoints left behind by an unhandled crash (§5).
@@ -538,8 +538,8 @@ class ProtectedIndexer:
                 data = json.loads(chk_path.read_text(encoding="utf-8"))
                 if data["stage"] in ("OLD_DELETED", "CATALOG_PENDING", "INSERTING_NEW"):
                     logger.warning(
-                        "Rilevato checkpoint non completato da crash precedente: %s "
-                        "(doc: %s, file: %s, stage: %s). Avvio recovery...",
+                        "Detected incomplete checkpoint from previous crash: %s "
+                        "(doc: %s, file: %s, stage: %s). Starting recovery...",
                         data["checkpoint_id"],
                         data["old_canonical_doc_id"],
                         data["relative_path"],
@@ -551,7 +551,7 @@ class ProtectedIndexer:
                     # Checkpoint created before index mutation; safe to discard
                     chk_path.unlink(missing_ok=True)
             except Exception as exc:
-                logger.error("Impossibile recuperare checkpoint %s: %s", chk_path, exc)
+                logger.error("Failed to recover checkpoint %s: %s", chk_path, exc)
                 raise
 
         return recovered
@@ -564,7 +564,7 @@ class ProtectedIndexer:
     ) -> None:
         """Execute recovery from persistent checkpoint restoring LightRAG and Catalog (§5)."""
         logger.warning(
-            "Avvio recovery per '%s' (canonical doc: %s) da checkpoint %s...",
+            "Starting recovery for '%s' (canonical doc: %s) from checkpoint %s...",
             checkpoint["relative_path"],
             checkpoint["old_canonical_doc_id"],
             checkpoint["checkpoint_id"],
@@ -600,23 +600,23 @@ class ProtectedIndexer:
             # 5. Remove completed checkpoint file
             self._remove_checkpoint(checkpoint)
 
-            logger.info("Recovery riuscito per '%s': stato precedente ripristinato.", checkpoint["relative_path"])
+            logger.info("Recovery succeeded for '%s': previous state restored.", checkpoint["relative_path"])
             if raise_on_success:
                 raise RecoverySucceededError(
-                    f"Aggiornamento di '{checkpoint['relative_path']}' fallito ({original_exc}), "
-                    f"ma la recovery da checkpoint ha ripristinato con successo lo stato precedente."
+                    f"Update of '{checkpoint['relative_path']}' failed ({original_exc}), "
+                    f"but checkpoint recovery successfully restored the previous state."
                 ) from original_exc
 
         except RecoverySucceededError:
             raise
         except Exception as rec_exc:
-            logger.critical("Recovery fallita per '%s': %s", checkpoint["relative_path"], rec_exc)
+            logger.critical("Recovery failed for '%s': %s", checkpoint["relative_path"], rec_exc)
             self.catalog.update_document_status(checkpoint["old_canonical_doc_id"], "FAILED")
             self._update_checkpoint_stage(checkpoint, "FAILED")
             cause = original_exc or rec_exc
             raise RecoveryFailedError(
-                f"Aggiornamento di '{checkpoint['relative_path']}' fallito E recovery da checkpoint fallita "
-                f"({rec_exc}): la KB è in stato DEGRADED."
+                f"Update of '{checkpoint['relative_path']}' failed AND checkpoint recovery failed "
+                f"({rec_exc}): KB is in DEGRADED state."
             ) from cause
 
     def index_new(
@@ -674,7 +674,7 @@ class ProtectedIndexer:
                     )
                 else:
                     logger.warning(
-                        "Documento '%s' presente nel catalogo ma assente o non PROCESSED su LightRAG. Reindicizzo...",
+                        "Document '%s' present in catalog but missing or not PROCESSED in LightRAG. Reindexing...",
                         existing_doc["canonical_doc_id"],
                     )
 
@@ -843,7 +843,7 @@ class ProtectedIndexer:
             old_doc = self.catalog.get_document(old_canonical_id)
             if old_doc is None:
                 raise CheckpointRequiredError(
-                    f"Documento canonico '{old_canonical_id}' non trovato nel catalogo per '{relative_path}'."
+                    f"Canonical document '{old_canonical_id}' not found in catalog for '{relative_path}'."
                 )
 
             # Mandatory checkpoint validation (§5):
@@ -851,27 +851,27 @@ class ProtectedIndexer:
             # Old doc must NOT be deleted without a valid persistent checkpoint.
             if not old_doc.get("extracted_artifact_path"):
                 raise CheckpointRequiredError(
-                    f"Checkpoint obbligatorio fallito per '{relative_path}': "
-                    f"nessun extracted_artifact_path nel catalogo per '{old_canonical_id}'."
+                    f"Mandatory checkpoint failed for '{relative_path}': "
+                    f"no extracted_artifact_path in catalog for '{old_canonical_id}'."
                 )
 
             old_art = Path(old_doc["extracted_artifact_path"])
             if not old_art.is_file():
                 raise CheckpointRequiredError(
-                    f"Checkpoint obbligatorio fallito per '{relative_path}': "
-                    f"il file di artifact derivato precedente '{old_art}' non esiste."
+                    f"Mandatory checkpoint failed for '{relative_path}': "
+                    f"previous derived artifact file '{old_art}' does not exist."
                 )
 
             checkpoint_content = old_art.read_text(encoding="utf-8", errors="replace")
             if not checkpoint_content.strip():
                 raise CheckpointRequiredError(
-                    f"Checkpoint obbligatorio fallito per '{relative_path}': "
-                    f"l'artifact derivato precedente '{old_art}' è vuoto."
+                    f"Mandatory checkpoint failed for '{relative_path}': "
+                    f"previous derived artifact '{old_art}' is empty."
                 )
 
             if not parsed["text_content"] or not parsed["text_content"].strip():
                 raise ValueError(
-                    f"Contenuto del nuovo documento per '{relative_path}' vuoto o non valido."
+                    f"New document content for '{relative_path}' empty or invalid."
                 )
 
             checkpoint_lightrag_id = old_doc.get("lightrag_doc_id")
@@ -908,7 +908,7 @@ class ProtectedIndexer:
                 del_ok = self.client.delete_documents([target_old_doc_id])
                 if not del_ok:
                     raise LightRAGError(
-                        f"Cancellazione vecchia versione '{target_old_doc_id}' da LightRAG fallita."
+                        f"Deletion of old version '{target_old_doc_id}' from LightRAG failed."
                     )
 
                 # 2. Upsert PENDING in catalog (INSIDE try)
@@ -958,7 +958,7 @@ class ProtectedIndexer:
                 )
             except Exception as update_exc:
                 logger.warning(
-                    "Aggiornamento fallito per '%s': avvio recovery dal checkpoint persistito...",
+                    "Update failed for '%s': starting recovery from persisted checkpoint...",
                     relative_path,
                 )
                 self._execute_recovery(checkpoint, original_exc=update_exc, raise_on_success=True)
@@ -1005,7 +1005,7 @@ class ProtectedIndexer:
                 # Do NOT delete from LightRAG. Deactivate file occurrence only.
                 self.catalog.set_file_active(source_id, relative_path, False)
                 logger.info(
-                    "File '%s' disattivato, ma canonical doc '%s' conservato in LightRAG (ha ancora %d alias attivi).",
+                    "File '%s' deactivated, but canonical doc '%s' retained in LightRAG (still has %d active aliases).",
                     relative_path,
                     canonical_id,
                     active_refs - 1,
@@ -1025,15 +1025,15 @@ class ProtectedIndexer:
             del_ok = self.client.delete_documents([target_id])
             if not del_ok:
                 raise LightRAGError(
-                    f"Cancellazione da LightRAG fallita per doc_id '{target_id}' (file: '{relative_path}'). "
-                    f"Il catalogo NON è stato disattivato per consentire il retry."
+                    f"Deletion from LightRAG failed for doc_id '{target_id}' (file: '{relative_path}'). "
+                    f"Catalog was NOT deactivated to allow retry."
                 )
 
             # Deletion confirmed from LightRAG: now safe to deactivate in catalog
             self.catalog.set_file_active(source_id, relative_path, False)
             self.catalog.delete_document_if_unreferenced(canonical_id)
 
-            logger.info("File '%s' rimosso e canonical doc '%s' eliminato da LightRAG.", relative_path, canonical_id)
+            logger.info("File '%s' removed and canonical doc '%s' deleted from LightRAG.", relative_path, canonical_id)
             return {
                 "action": "doc_deleted",
                 "canonical_doc_id": canonical_id,
